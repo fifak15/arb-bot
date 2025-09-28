@@ -1,0 +1,51 @@
+# --- Go build artifacts ---
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+bin/
+build/
+dist/
+tmp/
+*.log
+
+# Module / tooling caches
+**/.DS_Store
+**/Thumbs.db
+
+# go tool test cache
+.cache/
+cover.*
+coverage.*
+*.cov
+*.prof
+*.pprof
+
+# Vscode/GoLand/JetBrains
+.idea/
+*.iml
+out/
+
+# OS-specific
+Desktop.ini
+
+# Local configs / secrets (не коммитим!)
+.env
+.env.*
+config.local.yaml
+*.secret.yaml
+*.private.yaml
+
+
+docs/gen/
+swagger/gen/
+
+# Prometheus/Grafana локальные данные (если поднимаешь локально)
+prom_data/
+grafana-data/
+
+node_modules/

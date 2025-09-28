@@ -1,0 +1,41 @@
+
+pair: "ETHUSDT"
+scenario: "CEX_BUY_DEX_SELL"
+mode: "real"
+dry_run: true
+mexc:
+  api_key: "YOUR_MEXC_KEY"
+  api_secret: "YOUR_MEXC_SECRET"
+  rest_url: "https://api.mexc.com"
+  ws_url: "wss://wbs-api.mexc.com/ws"
+  taker_fee_bps: 10
+
+chain:
+  network: "ethereum"
+  rpc_http: "https://mainnet.infura.io/v3/395619ca594343a59f82e2fe7f71f8e4"
+  rpc_ws: "wss://mainnet.infura.io/ws/v3/395619ca594343a59f82e2fe7f71f8e4"
+  wallet_pk: ""
+  max_priority_fee_gwei: 2
+  gas_limit_swap: 180000
+
+dex:
+  weth: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+  usdt: "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+  fee_tiers: [500, 3000]
+
+risk:
+  max_slippage_bps: 50
+  min_profit_usd: 8
+  min_roi_bps: 10
+  max_gas_usd: 10
+  min_fill_ratio: 0.7
+
+trade:
+  base_qty: 1
+
+metrics:
+  listen_addr: ":9090"
+
+timings:
+  quote_interval_ms: 300
+  detector_tick_ms: 150
