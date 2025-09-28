@@ -7,7 +7,7 @@ import (
 	"math/big"
 	"strings"
 
-	ethereum "github.com/ethereum/go-ethereum" // CallMsg
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -17,12 +17,10 @@ import (
 )
 
 type Quoter interface {
-	// outUSD — ожидаемая выручка в USDT/USDC (1:1 к USD), gasUSD — оценка газа в USD.
 	QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, err error)
 }
 
 type Router interface {
-	// amountInWei — количество WETH в wei, minOut — минимальный out в единицах стейблкоина (6 знаков).
 	SwapExactInput(ctx context.Context, amountInWei *big.Int, minOut uint64) (txHash string, err error)
 }
 
