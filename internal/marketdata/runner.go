@@ -2,9 +2,11 @@ package marketdata
 
 import (
 	"context"
-	"github.com/you/arb-bot/internal/config"
-	"go.uber.org/zap"
 	"time"
+
+	"github.com/you/arb-bot/internal/config"
+	imetrics "github.com/you/arb-bot/internal/metrics"
+	"go.uber.org/zap"
 )
 
 type Snapshot struct {
@@ -43,7 +45,6 @@ func Run(
 			return
 
 		case <-t.C:
-			// 1) получаем стакан с CEX
 			bid, ask, err := cex.BestBidAsk(cfg.Pair)
 			if err != nil {
 				log.Warn("cex BestBidAsk failed",
@@ -68,13 +69,13 @@ func Run(
 				zap.Float64("ask", ask),
 				zap.Float64("mid", mid),
 			)
-
-			// 2) дергаем квотер DEX
+			imetrics.CEXMid.Set(mid)
 			started := time.Now()
 			dexOut, gasUSD, err := quoter.QuoteDexOutUSD(ctx, cfg.Trade.BaseQty, mid)
 			took := time.Since(started)
 
 			if err != nil {
+				imetrics.QuoterErrors.Inc()
 				log.Warn("quoter failed",
 					zap.String("pair", cfg.Pair),
 					zap.Float64("qty_base", cfg.Trade.BaseQty),
@@ -83,6 +84,12 @@ func Run(
 					zap.Error(err),
 				)
 				continue
+			}
+
+			imetrics.DexOutUSD.Set(dexOut)
+			imetrics.GasUSD.Set(gasUSD)
+			if imetrics.QuoteLatency != nil {
+				imetrics.QuoteLatency.Observe(took.Seconds())
 			}
 
 			log.Info("dex quote ok",
@@ -94,7 +101,6 @@ func Run(
 				zap.Duration("took", took),
 			)
 
-			// 3) отдаём снапшот дальше по пайплайну
 			snap := Snapshot{
 				BestAskCEX: ask,
 				BestBidCEX: bid,

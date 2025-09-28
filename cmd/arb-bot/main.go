@@ -44,7 +44,7 @@ func main() {
 		logger.Warn("signal received, shutting down…")
 		cancel()
 	}()
-	go metrics.Serve(cfg.Metrics.ListenAddr, logger)
+	metrics.Serve(ctx, cfg.Metrics.ListenAddr, nil, logger)
 	logger.Info("dex fee tiers parsed", zap.Uint32s("tiers", cfg.DEX.FeeTiers))
 	cex, err := mexc.NewClient(cfg, logger)
 	if err != nil {
