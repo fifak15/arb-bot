@@ -26,17 +26,27 @@ type Router interface {
 	SwapExactInput(ctx context.Context, amountInWei *big.Int, minOut uint64) (txHash string, err error)
 }
 
-// Реализация Quoter, которая берёт спот-цену из slot0 пула (Uniswap V3)
 type slot0Quoter struct {
-	cfg  *config.Config
-	log  *zap.Logger
-	ec   *ethclient.Client
-	eabi abi.ABI
-	fabi abi.ABI // factory
-	pabi abi.ABI // pool
-	// кэш адресов пулов по fee
+	cfg   *config.Config
+	log   *zap.Logger
+	ec    *ethclient.Client
+	eabi  abi.ABI
+	fabi  abi.ABI
+	pabi  abi.ABI
+	q1abi abi.ABI // <— ДОБАВИТЬ: ABI квотера v1
 	pools map[uint32]common.Address
 }
+
+const quoterV1ABI = `[
+  {"inputs":[
+     {"internalType":"address","name":"tokenIn","type":"address"},
+     {"internalType":"address","name":"tokenOut","type":"address"},
+     {"internalType":"uint24","name":"fee","type":"uint24"},
+     {"internalType":"uint256","name":"amountIn","type":"uint256"},
+     {"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],
+   "name":"quoteExactInputSingle",
+   "outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],
+   "stateMutability":"nonpayable","type":"function"}]`
 
 const v3FactoryAddr = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
 
@@ -91,7 +101,6 @@ const poolABI = `[
   {"inputs":[],"name":"token1","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"}
 ]`
 
-// Конструктор
 func NewSlot0Quoter(cfg *config.Config, log *zap.Logger) (Quoter, error) {
 	ec, err := ethclient.Dial(cfg.Chain.RPCHTTP)
 	if err != nil {
@@ -100,21 +109,62 @@ func NewSlot0Quoter(cfg *config.Config, log *zap.Logger) (Quoter, error) {
 	fabi, _ := abi.JSON(strings.NewReader(factoryABI))
 	pabi, _ := abi.JSON(strings.NewReader(poolABI))
 	ercABI, _ := abi.JSON(strings.NewReader(erc20ABI))
+	q1abi, _ := abi.JSON(strings.NewReader(quoterV1ABI)) // <— ДОБАВИТЬ
 	return &slot0Quoter{
-		cfg:   cfg,
-		log:   log,
-		ec:    ec,
-		fabi:  fabi,
-		pabi:  pabi,
-		eabi:  ercABI, // <— добавьте поле в структуру
+		cfg: cfg, log: log, ec: ec,
+		eabi: ercABI, fabi: fabi, pabi: pabi,
+		q1abi: q1abi, // <— ДОБАВИТЬ
 		pools: make(map[uint32]common.Address),
 	}, nil
+}
+
+func (q *slot0Quoter) quoteExactInputSingleV1(ctx context.Context, fee uint32, amountInWei *big.Int) (*big.Int, error) {
+	quoter := common.HexToAddress(q.cfg.DEX.QuoterV1)
+	if quoter == (common.Address{}) {
+		return nil, fmt.Errorf("quoterV1 address not set")
+	}
+	weth := common.HexToAddress(q.cfg.DEX.WETH)
+	usdx := common.HexToAddress(q.cfg.DEX.USDT)
+
+	input, err := q.q1abi.Pack("quoteExactInputSingle",
+		weth, usdx, big.NewInt(int64(fee)), amountInWei, big.NewInt(0),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("pack quoterV1: %w", err)
+	}
+	from := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
+	msg := ethereum.CallMsg{From: from, To: &quoter, Gas: 2_000_000, Data: input}
+
+	// сначала pending, затем latest — повышает совместимость с RPC
+	res, err := q.ec.PendingCallContract(ctx, msg)
+	if err != nil {
+		res, err = q.ec.CallContract(ctx, msg, nil)
+		if err != nil {
+			return nil, fmt.Errorf("call quoterV1: %w", err)
+		}
+	}
+	outs, err := q.q1abi.Methods["quoteExactInputSingle"].Outputs.Unpack(res)
+	if err != nil || len(outs) == 0 {
+		return nil, fmt.Errorf("decode quoterV1: %w", err)
+	}
+	return outs[0].(*big.Int), nil
+}
+
+// маленький хелпер, чтобы не дублировать код
+func (q *slot0Quoter) estimateGasUSD(ctx context.Context, ethUSD float64) float64 {
+	gp, err := q.ec.SuggestGasPrice(ctx)
+	if err != nil {
+		return 0
+	}
+	gasWei := new(big.Int).Mul(gp, new(big.Int).SetUint64(q.cfg.Chain.GasLimitSwap))
+	return weiToUSD(gasWei, ethUSD)
 }
 
 func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, err error) {
 	if qtyBase <= 0 {
 		return 0, 0, fmt.Errorf("qtyBase must be > 0")
 	}
+
 	tiers := q.cfg.DEX.FeeTiers
 	if len(tiers) == 0 {
 		if q.cfg.DEX.FeeTier != 0 {
@@ -123,10 +173,43 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 			tiers = []uint32{500, 3000}
 		}
 	}
+
+	// qtyBase ETH -> wei
+	amountInWei := new(big.Int)
+	new(big.Float).Mul(big.NewFloat(qtyBase), big.NewFloat(1e18)).Int(amountInWei)
+
+	// decimals стейбла (USDC/USDT)
+	usdx := common.HexToAddress(q.cfg.DEX.USDT)
+	decUSDX, derr := q.erc20Decimals(ctx, usdx)
+	if derr != nil {
+		return 0, 0, derr
+	}
+
+	// 1) Пытаемся через Quoter V1 по всем fee и берём лучший amountOut
+	var bestOut *big.Int
+	for _, fee := range tiers {
+		amt, e := q.quoteExactInputSingleV1(ctx, fee, amountInWei)
+		if e != nil {
+			q.log.Warn("quoterV1 failed", zap.Uint32("fee", fee), zap.Error(e))
+			continue
+		}
+		if bestOut == nil || amt.Cmp(bestOut) > 0 {
+			bestOut = amt
+		}
+	}
+
+	if bestOut != nil {
+		outF := new(big.Float).Quo(new(big.Float).SetInt(bestOut), big.NewFloat(math.Pow10(decUSDX)))
+		outUSD, _ = outF.Float64()
+		q.log.Info("dex quote (quoter v1) selected", zap.Float64("out_usd", outUSD))
+		return outUSD, q.estimateGasUSD(ctx, ethUSD), nil
+	}
+
+	// 2) Фоллбек: slot0
 	var lastErr error
 	for _, tier := range tiers {
 		pool, e := q.getPool(ctx, tier)
-		if e != nil || (pool == common.Address{}) {
+		if e != nil || (pool == (common.Address{})) {
 			lastErr = fmt.Errorf("getPool fee %d: %w", tier, e)
 			continue
 		}
@@ -136,22 +219,15 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 			continue
 		}
 		outUSD = qtyBase * usdxPerWeth
+		q.log.Info("dex quote (slot0) selected", zap.Uint32("fee", tier), zap.Float64("out_usd", outUSD))
+		return outUSD, q.estimateGasUSD(ctx, ethUSD), nil
+	}
 
-		gp, e := q.ec.SuggestGasPrice(ctx)
-		if e != nil {
-			return outUSD, 0, nil
-		}
-		gasWei := new(big.Int).Mul(gp, new(big.Int).SetUint64(q.cfg.Chain.GasLimitSwap))
-		gasUSD = weiToUSD(gasWei, ethUSD)
-		return outUSD, gasUSD, nil
+	if lastErr != nil {
+		return 0, 0, lastErr
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no working fee tier")
-	}
-	return 0, 0, lastErr
+	return 0, 0, fmt.Errorf("no working fee tier")
 }
-
-// internal/dex/univ3/slot0_quoter.go
 
 func (q *slot0Quoter) getPool(ctx context.Context, fee uint32) (common.Address, error) {
 	if addr, ok := q.pools[fee]; ok && addr != (common.Address{}) {
