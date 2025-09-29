@@ -148,7 +148,6 @@ func (q *slot0Quoter) quoteExactInputSingleV1(ctx context.Context, fee uint32, a
 	from := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
 	msg := ethereum.CallMsg{From: from, To: &quoter, Gas: 2_000_000, Data: input}
 
-	// Сначала 'pending', затем 'latest' — повышает совместимость с разными RPC
 	res, err := q.ec.PendingCallContract(ctx, msg)
 	if err != nil {
 		res, err = q.ec.CallContract(ctx, msg, nil)
@@ -175,13 +174,13 @@ func (q *slot0Quoter) quoteExactInputSingleV2(ctx context.Context, fee uint32, a
 		TokenIn           common.Address
 		TokenOut          common.Address
 		AmountIn          *big.Int
-		Fee               uint32
+		Fee               *big.Int
 		SqrtPriceLimitX96 *big.Int
 	}{
 		TokenIn:           weth,
 		TokenOut:          usdx,
 		AmountIn:          amountInWei,
-		Fee:               fee,
+		Fee:               big.NewInt(int64(fee)),
 		SqrtPriceLimitX96: big.NewInt(0),
 	}
 
@@ -202,6 +201,7 @@ func (q *slot0Quoter) quoteExactInputSingleV2(ctx context.Context, fee uint32, a
 	if err != nil || len(outs) == 0 {
 		return nil, fmt.Errorf("decode quoterV2: %w", err)
 	}
+
 	return outs[0].(*big.Int), nil
 }
 
@@ -247,13 +247,13 @@ func (q *slot0Quoter) quoteExactOutputSingleV2(ctx context.Context, fee uint32, 
 		TokenIn           common.Address
 		TokenOut          common.Address
 		Amount            *big.Int
-		Fee               uint32
+		Fee               *big.Int
 		SqrtPriceLimitX96 *big.Int
 	}{
 		TokenIn:           usdx,
 		TokenOut:          weth,
 		Amount:            amountOutWei,
-		Fee:               fee,
+		Fee:               big.NewInt(int64(fee)),
 		SqrtPriceLimitX96: big.NewInt(0),
 	}
 
@@ -274,6 +274,7 @@ func (q *slot0Quoter) quoteExactOutputSingleV2(ctx context.Context, fee uint32, 
 	if err != nil || len(outs) == 0 {
 		return nil, fmt.Errorf("decode quoteExactOutputSingleV2: %w", err)
 	}
+
 	return outs[0].(*big.Int), nil
 }
 
