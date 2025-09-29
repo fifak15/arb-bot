@@ -8,9 +8,6 @@ import (
 	"syscall"
 	"time"
 
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-
 	"github.com/you/arb-bot/internal/config"
 	"github.com/you/arb-bot/internal/connectors/cex/mexc"
 	"github.com/you/arb-bot/internal/detector"
@@ -20,6 +17,8 @@ import (
 	"github.com/you/arb-bot/internal/metrics"
 	"github.com/you/arb-bot/internal/risk"
 	"github.com/you/arb-bot/internal/types"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func newRussianLogger() (*zap.Logger, error) {
