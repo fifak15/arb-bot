@@ -8,7 +8,10 @@ mexc:
   api_secret: "YOUR_MEXC_SECRET"
   rest_url: "https://api.mexc.com"
   ws_url: "wss://wbs-api.mexc.com/ws"
-  taker_fee_bps: 10
+  withdrawal_fee_base: 0.0012
+  taker_fee_bps: 5    # 0.05% стандартный спот-тейкер
+  # taker_fee_bps: 4  # если включена MX Deduction (-20%)
+  # taker_fee_bps: 0  # если торгуем парой со 0% fee (на время акции)
 
 chain:
   network: "ethereum"

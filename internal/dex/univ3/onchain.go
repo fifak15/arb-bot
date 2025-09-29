@@ -297,7 +297,6 @@ func (q *slot0Quoter) getPool(ctx context.Context, fee uint32) (common.Address, 
 		return common.Address{}, fmt.Errorf("no pool for fee %d", fee)
 	}
 
-	// Проверяем, что в пуле есть ликвидность
 	liqCall, _ := q.pabi.Pack("liquidity")
 	liqRaw, err := q.ec.CallContract(ctx, ethereum.CallMsg{To: &pool, Data: liqCall}, nil)
 	if err == nil {

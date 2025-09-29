@@ -2,11 +2,12 @@ package detector
 
 import (
 	"context"
+	"time"
+
 	"github.com/you/arb-bot/internal/config"
 	"github.com/you/arb-bot/internal/marketdata"
 	"github.com/you/arb-bot/internal/types"
 	"go.uber.org/zap"
-	"time"
 )
 
 func Run(ctx context.Context, cfg *config.Config, in <-chan marketdata.Snapshot, out chan<- types.Opportunity, log *zap.Logger) {
@@ -26,13 +27,29 @@ func Run(ctx context.Context, cfg *config.Config, in <-chan marketdata.Snapshot,
 			q := cfg.Trade.BaseQty
 			taker := last.BestAskCEX * q * float64(cfg.MEXC.TakerFeeBps) / 10000.0
 			cost := last.BestAskCEX*q + taker
-			net := last.DexOutUSD - cost - last.GasUSD
+
+			mid := last.BestAskCEX
+			if last.BestBidCEX > 0 {
+				mid = 0.5 * (last.BestBidCEX + last.BestAskCEX)
+			}
+			withdrawUSD := mid * cfg.MEXC.WithdrawalFeeBase
+			net := last.DexOutUSD - cost - last.GasUSD - withdrawUSD
+
 			roi := 0.0
 			if cost > 0 {
 				roi = net / cost
 			}
+
 			if net >= cfg.Risk.MinProfitUSD && roi >= (cfg.Risk.MinROIBps/10000.0) {
-				out <- types.Opportunity{QtyBase: q, BuyPxCEX: last.BestAskCEX, DexOutUSD: last.DexOutUSD, GasUSD: last.GasUSD, NetUSD: net, ROI: roi, Ts: time.Now()}
+				out <- types.Opportunity{
+					QtyBase:   q,
+					BuyPxCEX:  last.BestAskCEX,
+					DexOutUSD: last.DexOutUSD,
+					GasUSD:    last.GasUSD,
+					NetUSD:    net,
+					ROI:       roi,
+					Ts:        time.Now(),
+				}
 			}
 		}
 	}

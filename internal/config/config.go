@@ -14,11 +14,12 @@ type Config struct {
 	DryRun   bool   `yaml:"dry_run"`
 
 	MEXC struct {
-		ApiKey      string `yaml:"api_key"`
-		ApiSecret   string `yaml:"api_secret"`
-		RestURL     string `yaml:"rest_url"`
-		WsURL       string `yaml:"ws_url"`
-		TakerFeeBps int    `yaml:"taker_fee_bps"`
+		ApiKey            string  `yaml:"api_key"`
+		ApiSecret         string  `yaml:"api_secret"`
+		RestURL           string  `yaml:"rest_url"`
+		WsURL             string  `yaml:"ws_url"`
+		TakerFeeBps       int     `yaml:"taker_fee_bps"`
+		WithdrawalFeeBase float64 `yaml:"withdrawal_fee_base"`
 	} `yaml:"mexc"`
 
 	Chain struct {
