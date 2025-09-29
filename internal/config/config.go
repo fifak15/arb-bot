@@ -33,7 +33,6 @@ type Config struct {
 
 	DEX struct {
 		Router   string   `yaml:"router"`
-		Quoter   string   `yaml:"quoter"`
 		QuoterV1 string   `yaml:"quoter_v1"`
 		QuoterV2 string   `yaml:"quoter_v2"`
 		WETH     string   `yaml:"weth"`

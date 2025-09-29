@@ -171,7 +171,6 @@ func (q *slot0Quoter) quoteExactInputSingleV2(ctx context.Context, fee uint32, a
 	weth := common.HexToAddress(q.cfg.DEX.WETH)
 	usdx := common.HexToAddress(q.cfg.DEX.USDT)
 
-	// QuoterV2 uses a struct for parameters
 	params := struct {
 		TokenIn           common.Address
 		TokenOut          common.Address
@@ -400,7 +399,6 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 	var bestFee uint32
 	var quoterVersion string
 
-	// 1) Try QuoterV2 first
 	if q.cfg.DEX.QuoterV2 != "" {
 		for _, fee := range tiers {
 			amt, e := q.quoteExactInputSingleV2(ctx, fee, amountInWei)
@@ -416,7 +414,6 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 		}
 	}
 
-	// 2) Fallback to QuoterV1 if V2 is not configured or failed for all tiers
 	if bestOut == nil && q.cfg.DEX.QuoterV1 != "" {
 		for _, fee := range tiers {
 			amt, e := q.quoteExactInputSingleV1(ctx, fee, amountInWei)
@@ -432,7 +429,6 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 		}
 	}
 
-	// If a quote was found with either version
 	if bestOut != nil {
 		human := new(big.Float).Quo(new(big.Float).SetInt(bestOut), big.NewFloat(math.Pow10(decUSDX)))
 		outUSD, _ = human.Float64()
@@ -445,12 +441,9 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 		return outUSD, q.estimateGasUSD(ctx, ethUSD), bestFee, nil
 	}
 
-	// REMOVED: Fallback to slot0 calculation, as it's inaccurate.
 	q.log.Error("Could not get a quote from any quoter")
 	return 0, 0, 0, fmt.Errorf("no working quoter found for any fee tier")
 }
-
-// --- Factory getPool (+ проверка ликвидности) ---
 
 func (q *slot0Quoter) getPool(ctx context.Context, fee uint32) (common.Address, error) {
 	if addr, ok := q.pools[fee]; ok && addr != (common.Address{}) {
