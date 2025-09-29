@@ -130,17 +130,18 @@ func (c *Client) PlaceIOC(ctx context.Context, symbol, side string, qty, price f
 	status, _ := ord["status"].(string)
 
 	if execQty <= 0 {
-		c.log.Warn("IOC not filled", zap.String("status", status), zap.String("id", orderID))
+		c.log.Warn("IOC: исполнение отсутствует — ордер отменён", zap.String("status", status), zap.String("order_id", orderID), zap.String("symbol", symbol))
 		return orderID, 0, 0, nil
 	}
 	if execQty > 0 {
 		avgPrice = cummQuote / execQty
 	}
-	c.log.Info("IOC filled",
-		zap.String("id", orderID),
+	c.log.Info("IOC: исполнение успешно",
+		zap.String("order_id", orderID),
 		zap.String("status", status),
-		zap.Float64("execQty", execQty),
-		zap.Float64("avgPrice", avgPrice),
+		zap.String("symbol", symbol),
+		zap.Float64("executed_qty", execQty),
+		zap.Float64("avg_price", avgPrice),
 	)
 	return orderID, execQty, avgPrice, nil
 }

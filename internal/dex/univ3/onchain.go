@@ -143,7 +143,7 @@ func (q *slot0Quoter) quoteExactInputSingleV1(ctx context.Context, fee uint32, a
 	from := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
 	msg := ethereum.CallMsg{From: from, To: &quoter, Gas: 2_000_000, Data: input}
 
-	// сначала pending, затем latest — повышает совместимость с RPC
+	// Сначала 'pending', затем 'latest' — повышает совместимость с разными RPC
 	res, err := q.ec.PendingCallContract(ctx, msg)
 	if err != nil {
 		res, err = q.ec.CallContract(ctx, msg, nil)
@@ -158,12 +158,12 @@ func (q *slot0Quoter) quoteExactInputSingleV1(ctx context.Context, fee uint32, a
 	return outs[0].(*big.Int), nil
 }
 
-// --- Gas helper (EIP-1559 aware) ---
+// --- Оценка газа в USD (EIP-1559 aware) ---
 
 func (q *slot0Quoter) estimateGasUSD(ctx context.Context, ethUSD float64) float64 {
 	header, err := q.ec.HeaderByNumber(ctx, nil)
 	if err != nil || header.BaseFee == nil {
-		// fallback на legacy
+		// Фоллбек на legacy-режим
 		gp, e2 := q.ec.SuggestGasPrice(ctx)
 		if e2 != nil {
 			return 0
@@ -173,14 +173,14 @@ func (q *slot0Quoter) estimateGasUSD(ctx context.Context, ethUSD float64) float6
 	}
 	tip, err := q.ec.SuggestGasTipCap(ctx)
 	if err != nil {
-		tip = big.NewInt(1e9) // 1 gwei дефолт
+		tip = big.NewInt(1e9) // 1 gwei по умолчанию
 	}
 	eff := new(big.Int).Add(header.BaseFee, tip)
 	gasWei := new(big.Int).Mul(eff, new(big.Int).SetUint64(q.cfg.Chain.GasLimitSwap))
 	return weiToUSD(gasWei, ethUSD)
 }
 
-// --- Public quote ---
+// --- Публичная котировка ---
 
 func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, err error) {
 	if qtyBase <= 0 {
@@ -206,12 +206,12 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 		return 0, 0, derr
 	}
 
-	// 1) Пытаемся через Quoter V1 по всем fee и берём лучший amountOut
+	// 1) Пробуем Quoter V1 по всем fee и берём лучший amountOut
 	var bestOut *big.Int
 	for _, fee := range tiers {
 		amt, e := q.quoteExactInputSingleV1(ctx, fee, amountInWei)
 		if e != nil {
-			q.log.Warn("quoterV1 failed", zap.Uint32("fee", fee), zap.Error(e))
+			q.log.Warn("QuoterV1: не удалось получить котировку", zap.Uint32("fee", fee), zap.Error(e))
 			continue
 		}
 		if bestOut == nil || amt.Cmp(bestOut) > 0 {
@@ -222,7 +222,7 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 	if bestOut != nil {
 		human := new(big.Float).Quo(new(big.Float).SetInt(bestOut), big.NewFloat(math.Pow10(decUSDX)))
 		outUSD, _ = human.Float64()
-		q.log.Info("dex quote (quoter v1) selected",
+		q.log.Info("DEX-котировка (Quoter V1) выбрана",
 			zap.String("amount_out_raw", bestOut.String()),
 			zap.Int("usdx_decimals", decUSDX),
 			zap.Float64("amount_out_human", outUSD),
@@ -230,7 +230,7 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 		return outUSD, q.estimateGasUSD(ctx, ethUSD), nil
 	}
 
-	// 2) Фоллбек: slot0
+	// 2) Фоллбек: расчёт по slot0
 	var lastErr error
 	for _, tier := range tiers {
 		pool, e := q.getPool(ctx, tier)
@@ -244,7 +244,7 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 			continue
 		}
 		outUSD = qtyBase * usdxPerWeth
-		q.log.Info("dex quote (slot0) selected", zap.Uint32("fee", tier), zap.Float64("out_usd", outUSD))
+		q.log.Info("DEX-котировка (slot0) выбрана", zap.Uint32("fee", tier), zap.Float64("out_usd", outUSD))
 		return outUSD, q.estimateGasUSD(ctx, ethUSD), nil
 	}
 
@@ -254,25 +254,25 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 	return 0, 0, fmt.Errorf("no working fee tier")
 }
 
-// --- Factory getPool (+ liquidity check) ---
+// --- Factory getPool (+ проверка ликвидности) ---
 
 func (q *slot0Quoter) getPool(ctx context.Context, fee uint32) (common.Address, error) {
 	if addr, ok := q.pools[fee]; ok && addr != (common.Address{}) {
-		q.log.Debug("getPool cache hit", zap.Uint32("fee", fee), zap.String("pool", addr.Hex()))
+		q.log.Debug("getPool: найдено в кэше", zap.Uint32("fee", fee), zap.String("pool", addr.Hex()))
 		return addr, nil
 	}
 	weth := common.HexToAddress(q.cfg.DEX.WETH)
 	usdx := common.HexToAddress(q.cfg.DEX.USDT)
 
-	// ВАЖНО: *big.Int для uint24 и обработка ошибки
+	// Важно: *big.Int для uint24 и обработка ошибки
 	input, err := q.fabi.Pack("getPool", weth, usdx, big.NewInt(int64(fee)))
 	if err != nil {
-		q.log.Warn("getPool pack failed", zap.Uint32("fee", fee), zap.Error(err))
+		q.log.Warn("getPool: ошибка упаковки параметров", zap.Uint32("fee", fee), zap.Error(err))
 		return common.Address{}, fmt.Errorf("pack getPool: %w", err)
 	}
 
 	faddr := common.HexToAddress(v3FactoryAddr)
-	q.log.Debug("getPool call",
+	q.log.Debug("getPool: вызов метода",
 		zap.String("factory", faddr.Hex()),
 		zap.String("weth", weth.Hex()), zap.String("usdx", usdx.Hex()),
 		zap.Uint32("fee", fee),
@@ -280,7 +280,7 @@ func (q *slot0Quoter) getPool(ctx context.Context, fee uint32) (common.Address, 
 
 	res, err := q.ec.CallContract(ctx, ethereum.CallMsg{To: &faddr, Data: input}, nil)
 	if err != nil {
-		q.log.Warn("getPool call failed", zap.Uint32("fee", fee), zap.Error(err))
+		q.log.Warn("getPool: вызов контракта не удался", zap.Uint32("fee", fee), zap.Error(err))
 		return common.Address{}, fmt.Errorf("call getPool: %w", err)
 	}
 	outs, err := q.fabi.Methods["getPool"].Outputs.Unpack(res)
@@ -288,42 +288,40 @@ func (q *slot0Quoter) getPool(ctx context.Context, fee uint32) (common.Address, 
 		if err == nil {
 			err = fmt.Errorf("empty getPool output")
 		}
-		q.log.Warn("getPool decode failed", zap.Uint32("fee", fee), zap.Error(err))
+		q.log.Warn("getPool: не удалось декодировать ответ", zap.Uint32("fee", fee), zap.Error(err))
 		return common.Address{}, fmt.Errorf("decode getPool: %w", err)
 	}
 	pool := outs[0].(common.Address)
 	if pool == (common.Address{}) {
-		q.log.Warn("getPool empty address", zap.Uint32("fee", fee))
+		q.log.Warn("getPool: пул не найден (пустой адрес)", zap.Uint32("fee", fee))
 		return common.Address{}, fmt.Errorf("no pool for fee %d", fee)
 	}
 
-	// проверим, что в пуле есть ликвидность
+	// Проверяем, что в пуле есть ликвидность
 	liqCall, _ := q.pabi.Pack("liquidity")
 	liqRaw, err := q.ec.CallContract(ctx, ethereum.CallMsg{To: &pool, Data: liqCall}, nil)
 	if err == nil {
 		liqOut, err := q.pabi.Methods["liquidity"].Outputs.Unpack(liqRaw)
 		if err == nil && len(liqOut) > 0 {
 			if liq, ok := liqOut[0].(*big.Int); ok && liq.Sign() == 0 {
-				q.log.Warn("pool has zero liquidity", zap.Uint32("fee", fee), zap.String("pool", pool.Hex()))
+				q.log.Warn("getPool: у пула нулевая ликвидность", zap.Uint32("fee", fee), zap.String("pool", pool.Hex()))
 				return common.Address{}, fmt.Errorf("pool %s has zero liquidity", pool.Hex())
 			}
 		}
 	}
 
 	q.pools[fee] = pool
-	q.log.Info("getPool ok", zap.Uint32("fee", fee), zap.String("pool", pool.Hex()))
+	q.log.Info("getPool: пул найден", zap.Uint32("fee", fee), zap.String("pool", pool.Hex()))
 	return pool, nil
 }
 
-// --- slot0 → цена USDX за 1 WETH ---
-
 func (q *slot0Quoter) readSpotUSDXPerWETH(ctx context.Context, pool common.Address) (float64, error) {
-	q.log.Debug("slot0.read start", zap.String("pool", pool.Hex()))
+	q.log.Debug("slot0: начинаю чтение цены", zap.String("pool", pool.Hex()))
 
 	call := func(name string) ([]byte, error) {
 		input, err := q.pabi.Pack(name)
 		if err != nil {
-			q.log.Warn("pack failed", zap.String("method", name), zap.Error(err))
+			q.log.Warn("slot0: не удалось упаковать вызов", zap.String("method", name), zap.Error(err))
 			return nil, err
 		}
 		return q.ec.CallContract(ctx, ethereum.CallMsg{To: &pool, Data: input}, nil)
@@ -351,7 +349,7 @@ func (q *slot0Quoter) readSpotUSDXPerWETH(ctx context.Context, pool common.Addre
 	}
 	token1 := outs1[0].(common.Address)
 
-	q.log.Debug("pool tokens", zap.String("token0", token0.Hex()), zap.String("token1", token1.Hex()))
+	q.log.Debug("slot0: адреса токенов пула", zap.String("token0", token0.Hex()), zap.String("token1", token1.Hex()))
 
 	// slot0
 	inputSlot0, err := q.pabi.Pack("slot0")
@@ -379,7 +377,7 @@ func (q *slot0Quoter) readSpotUSDXPerWETH(ctx context.Context, pool common.Addre
 	}
 	tick := int32(ti)
 
-	q.log.Debug("slot0 ok",
+	q.log.Debug("slot0: чтение успешно",
 		zap.String("sqrtPriceX96", sqrtPriceX96.String()),
 		zap.Int32("tick", tick),
 	)
@@ -405,7 +403,7 @@ func (q *slot0Quoter) readSpotUSDXPerWETH(ctx context.Context, pool common.Addre
 	// масштабный коэффициент 10^(dec0 - dec1)
 	scale := math.Pow10(dec0 - dec1)
 	humanP1perP0 := priceToken1PerToken0 * scale
-	q.log.Debug("slot0 price",
+	q.log.Debug("slot0: расчёт цены для человека",
 		zap.Float64("raw_p1_per_p0", priceToken1PerToken0),
 		zap.Int("dec0", dec0),
 		zap.Int("dec1", dec1),

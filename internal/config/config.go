@@ -32,8 +32,8 @@ type Config struct {
 
 	DEX struct {
 		Router   string   `yaml:"router"`
-		Quoter   string   `yaml:"quoter"`    // можно не трогать
-		QuoterV1 string   `yaml:"quoter_v1"` // <— ДОБАВИТЬ
+		Quoter   string   `yaml:"quoter"`
+		QuoterV1 string   `yaml:"quoter_v1"`
 		WETH     string   `yaml:"weth"`
 		USDT     string   `yaml:"usdt"`
 		FeeTier  uint32   `yaml:"fee_tier"`

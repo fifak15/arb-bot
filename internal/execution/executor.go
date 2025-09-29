@@ -2,7 +2,6 @@ package execution
 
 import (
 	"context"
-	"fmt"
 	"math/big"
 	"time"
 
@@ -14,9 +13,11 @@ import (
 type cexIface interface {
 	PlaceIOC(ctx context.Context, symbol string, side string, qty float64, price float64) (orderID string, filledQty, avgPrice float64, err error)
 }
+
 type routerIface interface {
 	SwapExactInput(ctx context.Context, amountInWei *big.Int, minOut uint64) (txHash string, err error)
 }
+
 type Risk interface {
 	AllowTrade(netUSD, roi float64) bool
 }
@@ -38,24 +39,60 @@ func (e *Executor) Run(ctx context.Context, in <-chan types.Opportunity) {
 		select {
 		case <-ctx.Done():
 			return
+
 		case opp := <-in:
 			if !e.risk.AllowTrade(opp.NetUSD, opp.ROI) {
+				e.log.Debug("Сделка отклонена risk-managment", zap.Float64("netUSD", opp.NetUSD), zap.Float64("roi", opp.ROI))
 				continue
 			}
+			if e.router == nil {
+				e.log.Error("Роутер не инициализирован — своп на DEX невозможен")
+				continue
+			}
+
 			orderID, filled, avg, err := e.cex.PlaceIOC(ctx, e.cfg.Pair, "BUY", opp.QtyBase, opp.BuyPxCEX)
 			if err != nil || filled <= 0 {
-				e.log.Warn("CEX IOC failed", zap.Error(err))
+				e.log.Warn("IOC на CEX не исполнен или произошла ошибка", zap.Error(err))
 				continue
 			}
-			minOut := uint64(opp.DexOutUSD * (1.0 - float64(e.cfg.Risk.MaxSlippageBps)/10000.0) * 1e6)
+
+			if opp.QtyBase <= 0 {
+				e.log.Warn("Некорректное базовое количество в возможности", zap.Float64("qtyBase", opp.QtyBase))
+				continue
+			}
+			scale := filled / opp.QtyBase
+			if scale <= 0 {
+				e.log.Warn("Некорректный масштаб после IOC (filled/baseQty <= 0)", zap.Float64("filled", filled), zap.Float64("baseQty", opp.QtyBase))
+				continue
+			}
+
+			expectedOutUSD := opp.DexOutUSD * scale
+
+			slip := 1.0 - float64(e.cfg.Risk.MaxSlippageBps)/10000.0
+			if slip < 0 {
+				slip = 0
+			}
+			minOut := uint64(expectedOutUSD * slip * 1e6)
+
 			inWei := new(big.Int)
-			inWei.SetString(fmt.Sprintf("%.0f", filled*1e18), 10)
+			bf := new(big.Float).Mul(big.NewFloat(filled), big.NewFloat(1e18))
+			bf.Int(inWei)
+
 			tx, err := e.router.SwapExactInput(ctx, inWei, minOut)
 			if err != nil {
-				e.log.Error("DEX swap failed", zap.Error(err))
+				e.log.Error("Своп на DEX не выполнен", zap.Error(err))
 				continue
 			}
-			e.log.Info("EXECUTED", zap.String("order_id", orderID), zap.String("tx", tx), zap.Float64("filled", filled), zap.Float64("avgPx", avg), zap.Float64("net", opp.NetUSD))
+
+			e.log.Info("СДЕЛКА ВЫПОЛНЕНА",
+				zap.String("order_id", orderID),
+				zap.String("tx", tx),
+				zap.Float64("filled", filled),
+				zap.Float64("avgPx", avg),
+				zap.Float64("expectedOutUSD", expectedOutUSD),
+				zap.Float64("roi", opp.ROI),
+			)
+
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
