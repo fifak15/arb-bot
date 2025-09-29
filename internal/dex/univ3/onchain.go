@@ -7,7 +7,7 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/ethereum/go-ethereum"
+	ethereum "github.com/ethereum/go-ethereum" // CallMsg
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -17,10 +17,12 @@ import (
 )
 
 type Quoter interface {
+	// outUSD — ожидаемая выручка в USDT/USDC (1:1 к USD), gasUSD — оценка газа в USD.
 	QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, err error)
 }
 
 type Router interface {
+	// amountInWei — количество WETH в wei, minOut — минимальный out в единицах стейблкоина (6 знаков).
 	SwapExactInput(ctx context.Context, amountInWei *big.Int, minOut uint64) (txHash string, err error)
 }
 
@@ -28,23 +30,12 @@ type slot0Quoter struct {
 	cfg   *config.Config
 	log   *zap.Logger
 	ec    *ethclient.Client
-	eabi  abi.ABI
-	fabi  abi.ABI
-	pabi  abi.ABI
-	q1abi abi.ABI // <— ДОБАВИТЬ: ABI квотера v1
+	eabi  abi.ABI // ERC-20 (decimals)
+	fabi  abi.ABI // Factory (getPool)
+	pabi  abi.ABI // Pool (slot0, token0/1, liquidity)
+	q1abi abi.ABI // QuoterV1 (quoteExactInputSingle)
 	pools map[uint32]common.Address
 }
-
-const quoterV1ABI = `[
-  {"inputs":[
-     {"internalType":"address","name":"tokenIn","type":"address"},
-     {"internalType":"address","name":"tokenOut","type":"address"},
-     {"internalType":"uint24","name":"fee","type":"uint24"},
-     {"internalType":"uint256","name":"amountIn","type":"uint256"},
-     {"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],
-   "name":"quoteExactInputSingle",
-   "outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],
-   "stateMutability":"nonpayable","type":"function"}]`
 
 const v3FactoryAddr = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
 
@@ -80,11 +71,12 @@ const factoryABI = `[
    "name":"getPool","outputs":[{"internalType":"address","name":"pool","type":"address"}],
    "stateMutability":"view","type":"function"}
 ]`
+
 const erc20ABI = `[
   {"inputs":[],"name":"decimals","outputs":[{"internalType":"uint8","name":"","type":"uint8"}],"stateMutability":"view","type":"function"}
 ]`
 
-// Минимальный ABI пула для чтения slot0 и token0/token1
+// Минимальный ABI пула для чтения slot0 и token0/token1 + liquidity
 const poolABI = `[
   {"inputs":[],"name":"slot0","outputs":[
      {"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"},
@@ -96,9 +88,23 @@ const poolABI = `[
      {"internalType":"bool","name":"unlocked","type":"bool"}],
    "stateMutability":"view","type":"function"},
   {"inputs":[],"name":"token0","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},
-  {"inputs":[],"name":"token1","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"}
+  {"inputs":[],"name":"token1","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},
+  {"inputs":[],"name":"liquidity","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"}
 ]`
 
+// Quoter V1
+const quoterV1ABI = `[
+  {"inputs":[
+     {"internalType":"address","name":"tokenIn","type":"address"},
+     {"internalType":"address","name":"tokenOut","type":"address"},
+     {"internalType":"uint24","name":"fee","type":"uint24"},
+     {"internalType":"uint256","name":"amountIn","type":"uint256"},
+     {"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],
+   "name":"quoteExactInputSingle",
+   "outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],
+   "stateMutability":"nonpayable","type":"function"}]`
+
+// Конструктор
 func NewSlot0Quoter(cfg *config.Config, log *zap.Logger) (Quoter, error) {
 	ec, err := ethclient.Dial(cfg.Chain.RPCHTTP)
 	if err != nil {
@@ -107,11 +113,15 @@ func NewSlot0Quoter(cfg *config.Config, log *zap.Logger) (Quoter, error) {
 	fabi, _ := abi.JSON(strings.NewReader(factoryABI))
 	pabi, _ := abi.JSON(strings.NewReader(poolABI))
 	ercABI, _ := abi.JSON(strings.NewReader(erc20ABI))
-	q1abi, _ := abi.JSON(strings.NewReader(quoterV1ABI)) // <— ДОБАВИТЬ
+	q1abi, _ := abi.JSON(strings.NewReader(quoterV1ABI))
 	return &slot0Quoter{
-		cfg: cfg, log: log, ec: ec,
-		eabi: ercABI, fabi: fabi, pabi: pabi,
-		q1abi: q1abi, // <— ДОБАВИТЬ
+		cfg:   cfg,
+		log:   log,
+		ec:    ec,
+		fabi:  fabi,
+		pabi:  pabi,
+		eabi:  ercABI,
+		q1abi: q1abi,
 		pools: make(map[uint32]common.Address),
 	}, nil
 }
@@ -148,21 +158,34 @@ func (q *slot0Quoter) quoteExactInputSingleV1(ctx context.Context, fee uint32, a
 	return outs[0].(*big.Int), nil
 }
 
-// маленький хелпер, чтобы не дублировать код
+// --- Gas helper (EIP-1559 aware) ---
+
 func (q *slot0Quoter) estimateGasUSD(ctx context.Context, ethUSD float64) float64 {
-	gp, err := q.ec.SuggestGasPrice(ctx)
-	if err != nil {
-		return 0
+	header, err := q.ec.HeaderByNumber(ctx, nil)
+	if err != nil || header.BaseFee == nil {
+		// fallback на legacy
+		gp, e2 := q.ec.SuggestGasPrice(ctx)
+		if e2 != nil {
+			return 0
+		}
+		gasWei := new(big.Int).Mul(gp, new(big.Int).SetUint64(q.cfg.Chain.GasLimitSwap))
+		return weiToUSD(gasWei, ethUSD)
 	}
-	gasWei := new(big.Int).Mul(gp, new(big.Int).SetUint64(q.cfg.Chain.GasLimitSwap))
+	tip, err := q.ec.SuggestGasTipCap(ctx)
+	if err != nil {
+		tip = big.NewInt(1e9) // 1 gwei дефолт
+	}
+	eff := new(big.Int).Add(header.BaseFee, tip)
+	gasWei := new(big.Int).Mul(eff, new(big.Int).SetUint64(q.cfg.Chain.GasLimitSwap))
 	return weiToUSD(gasWei, ethUSD)
 }
+
+// --- Public quote ---
 
 func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, err error) {
 	if qtyBase <= 0 {
 		return 0, 0, fmt.Errorf("qtyBase must be > 0")
 	}
-
 	tiers := q.cfg.DEX.FeeTiers
 	if len(tiers) == 0 {
 		if q.cfg.DEX.FeeTier != 0 {
@@ -176,7 +199,7 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 	amountInWei := new(big.Int)
 	new(big.Float).Mul(big.NewFloat(qtyBase), big.NewFloat(1e18)).Int(amountInWei)
 
-	// decimals стейбла (USDC/USDT)
+	// decimals стейбла (USDX)
 	usdx := common.HexToAddress(q.cfg.DEX.USDT)
 	decUSDX, derr := q.erc20Decimals(ctx, usdx)
 	if derr != nil {
@@ -197,9 +220,13 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 	}
 
 	if bestOut != nil {
-		outF := new(big.Float).Quo(new(big.Float).SetInt(bestOut), big.NewFloat(math.Pow10(decUSDX)))
-		outUSD, _ = outF.Float64()
-		q.log.Info("dex quote (quoter v1) selected", zap.Float64("out_usd", outUSD))
+		human := new(big.Float).Quo(new(big.Float).SetInt(bestOut), big.NewFloat(math.Pow10(decUSDX)))
+		outUSD, _ = human.Float64()
+		q.log.Info("dex quote (quoter v1) selected",
+			zap.String("amount_out_raw", bestOut.String()),
+			zap.Int("usdx_decimals", decUSDX),
+			zap.Float64("amount_out_human", outUSD),
+		)
 		return outUSD, q.estimateGasUSD(ctx, ethUSD), nil
 	}
 
@@ -226,6 +253,8 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 	}
 	return 0, 0, fmt.Errorf("no working fee tier")
 }
+
+// --- Factory getPool (+ liquidity check) ---
 
 func (q *slot0Quoter) getPool(ctx context.Context, fee uint32) (common.Address, error) {
 	if addr, ok := q.pools[fee]; ok && addr != (common.Address{}) {
@@ -267,12 +296,27 @@ func (q *slot0Quoter) getPool(ctx context.Context, fee uint32) (common.Address, 
 		q.log.Warn("getPool empty address", zap.Uint32("fee", fee))
 		return common.Address{}, fmt.Errorf("no pool for fee %d", fee)
 	}
+
+	// проверим, что в пуле есть ликвидность
+	liqCall, _ := q.pabi.Pack("liquidity")
+	liqRaw, err := q.ec.CallContract(ctx, ethereum.CallMsg{To: &pool, Data: liqCall}, nil)
+	if err == nil {
+		liqOut, err := q.pabi.Methods["liquidity"].Outputs.Unpack(liqRaw)
+		if err == nil && len(liqOut) > 0 {
+			if liq, ok := liqOut[0].(*big.Int); ok && liq.Sign() == 0 {
+				q.log.Warn("pool has zero liquidity", zap.Uint32("fee", fee), zap.String("pool", pool.Hex()))
+				return common.Address{}, fmt.Errorf("pool %s has zero liquidity", pool.Hex())
+			}
+		}
+	}
+
 	q.pools[fee] = pool
 	q.log.Info("getPool ok", zap.Uint32("fee", fee), zap.String("pool", pool.Hex()))
 	return pool, nil
 }
 
-// Читаем slot0 и переводим sqrtPriceX96 в цену USDX за 1 WETH
+// --- slot0 → цена USDX за 1 WETH ---
+
 func (q *slot0Quoter) readSpotUSDXPerWETH(ctx context.Context, pool common.Address) (float64, error) {
 	q.log.Debug("slot0.read start", zap.String("pool", pool.Hex()))
 
@@ -359,7 +403,6 @@ func (q *slot0Quoter) readSpotUSDXPerWETH(ctx context.Context, pool common.Addre
 	}
 
 	// масштабный коэффициент 10^(dec0 - dec1)
-	// (переводит raw amount1/amount0 в человеческую цену token1_per_token0)
 	scale := math.Pow10(dec0 - dec1)
 	humanP1perP0 := priceToken1PerToken0 * scale
 	q.log.Debug("slot0 price",
@@ -373,13 +416,11 @@ func (q *slot0Quoter) readSpotUSDXPerWETH(ctx context.Context, pool common.Addre
 	case token0 == weth && token1 == usdx:
 		// хотим USDX за 1 WETH
 		return humanP1perP0, nil
-
 	case token0 == usdx && token1 == weth:
 		if humanP1perP0 == 0 {
 			return 0, fmt.Errorf("zero price")
 		}
 		return 1.0 / humanP1perP0, nil
-
 	default:
 		return 0, fmt.Errorf("pool tokens mismatch (token0=%s token1=%s)", token0.Hex(), token1.Hex())
 	}
@@ -389,7 +430,6 @@ func uniswapPriceFromSqrt(sqrtPriceX96 *big.Int) (float64, error) {
 	if sqrtPriceX96.Sign() <= 0 {
 		return 0, fmt.Errorf("bad sqrtPriceX96")
 	}
-
 	f := new(big.Float).SetPrec(256).SetInt(sqrtPriceX96)
 	f.Mul(f, f)
 	den := new(big.Float).SetPrec(256).SetFloat64(math.Exp2(192))

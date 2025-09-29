@@ -3,11 +3,12 @@ package execution
 import (
 	"context"
 	"fmt"
+	"math/big"
+	"time"
+
 	"github.com/you/arb-bot/internal/config"
 	"github.com/you/arb-bot/internal/types"
 	"go.uber.org/zap"
-	"math/big"
-	"time"
 )
 
 type cexIface interface {
