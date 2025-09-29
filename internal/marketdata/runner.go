@@ -10,15 +10,20 @@ import (
 )
 
 type Snapshot struct {
-	BestAskCEX, BestBidCEX, DexOutUSD, GasUSD float64
-	Ts                                        time.Time
+	BestAskCEX, BestBidCEX float64
+	DexOutUSD, GasSellUSD  float64 // CEX_BUY_DEX_SELL
+	DexInUSD, GasBuyUSD    float64 // DEX_BUY_CEX_SELL
+	DexSellFeeTier         uint32
+	DexBuyFeeTier          uint32
+	Ts                     time.Time
 }
 
 type cexIface interface {
 	BestBidAsk(symbol string) (bid, ask float64, err error)
 }
 type quoterIface interface {
-	QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, err error)
+	QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, feeTier uint32, err error)
+	QuoteDexInUSD(ctx context.Context, qtyBase float64, ethUSD float64) (inUSD float64, gasUSD float64, feeTier uint32, err error)
 }
 
 func Run(
@@ -47,80 +52,69 @@ func Run(
 		case <-t.C:
 			bid, ask, err := cex.BestBidAsk(cfg.Pair)
 			if err != nil {
-				log.Warn("cex BestBidAsk failed",
-					zap.String("pair", cfg.Pair),
-					zap.Error(err),
-				)
+				log.Warn("cex BestBidAsk failed", zap.String("pair", cfg.Pair), zap.Error(err))
 				continue
 			}
 			if bid == 0 || ask == 0 {
-				log.Debug("cex book empty or zero",
-					zap.String("pair", cfg.Pair),
-					zap.Float64("bid", bid),
-					zap.Float64("ask", ask),
-				)
+				log.Debug("cex book empty or zero", zap.String("pair", cfg.Pair), zap.Float64("bid", bid), zap.Float64("ask", ask))
 				continue
 			}
 
 			mid := 0.5 * (bid + ask)
-			log.Debug("cex mid computed",
-				zap.String("pair", cfg.Pair),
-				zap.Float64("bid", bid),
-				zap.Float64("ask", ask),
-				zap.Float64("mid", mid),
-			)
 			imetrics.CEXMid.Set(mid)
-			started := time.Now()
-			dexOut, gasUSD, err := quoter.QuoteDexOutUSD(ctx, cfg.Trade.BaseQty, mid)
-			took := time.Since(started)
 
-			if err != nil {
+			// Quote for CEX_BUY_DEX_SELL
+			startedSell := time.Now()
+			dexOut, gasSell, sellFee, errSell := quoter.QuoteDexOutUSD(ctx, cfg.Trade.BaseQty, mid)
+			if errSell != nil {
 				imetrics.QuoterErrors.Inc()
-				log.Warn("quoter failed",
-					zap.String("pair", cfg.Pair),
-					zap.Float64("qty_base", cfg.Trade.BaseQty),
-					zap.Float64("eth_usd(mid)", mid),
-					zap.Duration("took", took),
-					zap.Error(err),
-				)
+				log.Warn("quoter failed (dex sell)", zap.Error(errSell))
+				// continue? or publish partial? for now, skip.
 				continue
 			}
-
-			imetrics.DexOutUSD.Set(dexOut)
-			imetrics.GasUSD.Set(gasUSD)
-			if imetrics.QuoteLatency != nil {
-				imetrics.QuoteLatency.Observe(took.Seconds())
-			}
-
-			log.Info("dex quote ok",
-				zap.String("pair", cfg.Pair),
-				zap.Float64("qty_base", cfg.Trade.BaseQty),
-				zap.Float64("eth_usd(mid)", mid),
-				zap.Float64("dex_out_usd", dexOut),
-				zap.Float64("gas_usd", gasUSD),
-				zap.Duration("took", took),
+			log.Info("dex quote ok (sell)",
+				zap.Float64("out_usd", dexOut),
+				zap.Float64("gas_usd", gasSell),
+				zap.Uint32("fee_tier", sellFee),
+				zap.Duration("took", time.Since(startedSell)),
 			)
 
+			// Quote for DEX_BUY_CEX_SELL
+			startedBuy := time.Now()
+			dexIn, gasBuy, buyFee, errBuy := quoter.QuoteDexInUSD(ctx, cfg.Trade.BaseQty, mid)
+			if errBuy != nil {
+				imetrics.QuoterErrors.Inc()
+				log.Warn("quoter failed (dex buy)", zap.Error(errBuy))
+				continue
+			}
+			log.Info("dex quote ok (buy)",
+				zap.Float64("in_usd", dexIn),
+				zap.Float64("gas_usd", gasBuy),
+				zap.Uint32("fee_tier", buyFee),
+				zap.Duration("took", time.Since(startedBuy)),
+			)
+
+			imetrics.DexOutUSD.Set(dexOut)
+			imetrics.GasUSD.Set(gasSell) // Note: using sell gas for generic metric
+
 			snap := Snapshot{
-				BestAskCEX: ask,
-				BestBidCEX: bid,
-				DexOutUSD:  dexOut,
-				GasUSD:     gasUSD,
-				Ts:         time.Now(),
+				BestAskCEX:     ask,
+				BestBidCEX:     bid,
+				DexOutUSD:      dexOut,
+				GasSellUSD:     gasSell,
+				DexSellFeeTier: sellFee,
+				DexInUSD:       dexIn,
+				GasBuyUSD:      gasBuy,
+				DexBuyFeeTier:  buyFee,
+				Ts:             time.Now(),
 			}
 			select {
 			case out <- snap:
-				log.Debug("snapshot published",
-					zap.Float64("best_bid_cex", bid),
-					zap.Float64("best_ask_cex", ask),
-					zap.Float64("dex_out_usd", dexOut),
-					zap.Float64("gas_usd", gasUSD),
-				)
+			// OK
 			case <-ctx.Done():
 				log.Info("marketdata runner stopped while publishing")
 				return
 			default:
-				// если канал захлебнулся — не блокируемся, просто логируем
 				log.Warn("snapshot channel is full; dropping snapshot")
 			}
 		}

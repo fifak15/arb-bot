@@ -26,6 +26,7 @@ dex:
   usdt: "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
   fee_tiers: [500, 3000]
   quoter_v1: "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"
+  quoter_v2: "0x61fFE014bA17989E743c5F644A46d99701844F2"
 
 
 risk:

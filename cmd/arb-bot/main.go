@@ -50,28 +50,16 @@ func main() {
 	if err != nil {
 		logger.Fatal("mexc init", zap.Error(err))
 	}
-	var (
-		quoter univ3.Quoter
-		router univ3.Router
-	)
-	if cfg.DryRun {
-		q, err := univ3.NewSlot0Quoter(cfg, logger)
-		if err != nil {
-			logger.Fatal("uniswap quoter init", zap.Error(err))
-		}
-		quoter = q
-	} else {
-		q, err := univ3.NewSlot0Quoter(cfg, logger)
-		if err != nil {
-			logger.Fatal("uniswap init", zap.Error(err))
-		}
-		quoter = q
+	quoter, err := univ3.NewSlot0Quoter(cfg, logger)
+	if err != nil {
+		logger.Fatal("uniswap quoter init", zap.Error(err))
 	}
 
 	mdCh := make(chan marketdata.Snapshot, 1024)
 	oppCh := make(chan types.Opportunity, 1024)
 	go marketdata.Run(ctx, cfg, cex, quoter, mdCh, logger)
 	go detector.Run(ctx, cfg, mdCh, oppCh, logger)
+
 	if cfg.DryRun {
 		logger.Warn("running in DRY-RUN mode: no real orders/swaps will be sent")
 		go func() {
@@ -87,14 +75,22 @@ func main() {
 						zap.Float64("gas_usd", opp.GasUSD),
 						zap.Float64("net_usd", opp.NetUSD),
 						zap.Float64("roi", opp.ROI),
+						zap.Uint32("dex_fee_tier", opp.DexFeeTier),
 						zap.Time("ts", opp.Ts),
 					)
 				}
 			}
 		}()
 	} else {
+		router, err := univ3.NewRouter(cfg, logger)
+		if err != nil {
+			logger.Fatal("uniswap router init", zap.Error(err))
+		}
 		riskEng := risk.NewEngine(cfg)
-		exec := execution.NewExecutor(cfg, cex, router, riskEng, logger)
+		exec, err := execution.NewExecutor(cfg, cex, router, riskEng, logger)
+		if err != nil {
+			logger.Fatal("executor init", zap.Error(err))
+		}
 		go exec.Run(ctx, oppCh)
 	}
 
