@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/you/arb-bot/internal/config"
 	"github.com/you/arb-bot/internal/connectors/cex/mexc"
@@ -21,17 +22,63 @@ import (
 	"github.com/you/arb-bot/internal/types"
 )
 
+func newRussianLogger() (*zap.Logger, error) {
+	ruLevel := func(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+		switch l {
+		case zapcore.DebugLevel:
+			enc.AppendString("отладка")
+		case zapcore.InfoLevel:
+			enc.AppendString("инфо")
+		case zapcore.WarnLevel:
+			enc.AppendString("предупреждение")
+		case zapcore.ErrorLevel:
+			enc.AppendString("ошибка")
+		case zapcore.DPanicLevel, zapcore.PanicLevel, zapcore.FatalLevel:
+			enc.AppendString("фатальная")
+		default:
+			enc.AppendString(l.String())
+		}
+	}
+	ruTime := func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+		enc.AppendString(t.Format(time.RFC3339))
+	}
+
+	cfg := zap.Config{
+		Level:       zap.NewAtomicLevelAt(zap.DebugLevel),
+		Development: false,
+		Encoding:    "json",
+		EncoderConfig: zapcore.EncoderConfig{
+			TimeKey:        "время",
+			LevelKey:       "уровень",
+			NameKey:        "лог",
+			CallerKey:      "файл",
+			MessageKey:     "сообщение",
+			StacktraceKey:  "стек",
+			LineEnding:     zapcore.DefaultLineEnding,
+			EncodeLevel:    ruLevel,
+			EncodeTime:     ruTime,
+			EncodeDuration: zapcore.MillisDurationEncoder,
+			EncodeCaller:   zapcore.ShortCallerEncoder,
+		},
+		OutputPaths:      []string{"stdout"},
+		ErrorOutputPaths: []string{"stderr"},
+	}
+	return cfg.Build()
+}
+
 func main() {
-	cfgPath := flag.String("config", "./config.yaml", "path to config")
+	cfgPath := flag.String("config", "./config.yaml", "путь к конфигу")
 	flag.Parse()
 
-	logger, _ := zap.NewProduction()
-	logger = logger.WithOptions(zap.IncreaseLevel(zap.DebugLevel))
+	logger, err := newRussianLogger()
+	if err != nil {
+		panic(err)
+	}
 	defer logger.Sync()
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		logger.Fatal("load config", zap.Error(err))
+		logger.Fatal("ошибка загрузки конфига", zap.Error(err))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -41,39 +88,28 @@ func main() {
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigs
-		logger.Warn("signal received, shutting down…")
+		logger.Warn("получен сигнал, выходим…")
 		cancel()
 	}()
 	metrics.Serve(ctx, cfg.Metrics.ListenAddr, nil, logger)
-	logger.Info("dex fee tiers parsed", zap.Uint32s("tiers", cfg.DEX.FeeTiers))
+	logger.Info("распознаны fee-тиры DEX", zap.Uint32s("тиры", cfg.DEX.FeeTiers))
+
 	cex, err := mexc.NewClient(cfg, logger)
 	if err != nil {
-		logger.Fatal("mexc init", zap.Error(err))
+		logger.Fatal("инициализация MEXC", zap.Error(err))
 	}
-	var (
-		quoter univ3.Quoter
-		router univ3.Router
-	)
-	if cfg.DryRun {
-		q, err := univ3.NewSlot0Quoter(cfg, logger)
-		if err != nil {
-			logger.Fatal("uniswap quoter init", zap.Error(err))
-		}
-		quoter = q
-	} else {
-		q, err := univ3.NewSlot0Quoter(cfg, logger)
-		if err != nil {
-			logger.Fatal("uniswap init", zap.Error(err))
-		}
-		quoter = q
+	quoter, err := univ3.NewSlot0Quoter(cfg, logger)
+	if err != nil {
+		logger.Fatal("инициализация квотера Uniswap", zap.Error(err))
 	}
 
 	mdCh := make(chan marketdata.Snapshot, 1024)
 	oppCh := make(chan types.Opportunity, 1024)
 	go marketdata.Run(ctx, cfg, cex, quoter, mdCh, logger)
 	go detector.Run(ctx, cfg, mdCh, oppCh, logger)
+
 	if cfg.DryRun {
-		logger.Warn("running in DRY-RUN mode: no real orders/swaps will be sent")
+		logger.Warn("DRY-RUN: реальные ордера/свапы отправляться не будут")
 		go func() {
 			for {
 				select {
@@ -87,19 +123,27 @@ func main() {
 						zap.Float64("gas_usd", opp.GasUSD),
 						zap.Float64("net_usd", opp.NetUSD),
 						zap.Float64("roi", opp.ROI),
+						zap.Uint32("dex_fee_tier", opp.DexFeeTier),
 						zap.Time("ts", opp.Ts),
 					)
 				}
 			}
 		}()
 	} else {
+		router, err := univ3.NewRouter(cfg, logger)
+		if err != nil {
+			logger.Fatal("инициализация роутера Uniswap", zap.Error(err))
+		}
 		riskEng := risk.NewEngine(cfg)
-		exec := execution.NewExecutor(cfg, cex, router, riskEng, logger)
+		exec, err := execution.NewExecutor(cfg, cex, router, riskEng, logger)
+		if err != nil {
+			logger.Fatal("инициализация исполнителя", zap.Error(err))
+		}
 		go exec.Run(ctx, oppCh)
 	}
 
-	logger.Info("arb-bot started",
-		zap.String("pair", cfg.Pair),
+	logger.Info("бот запущен",
+		zap.String("пара", cfg.Pair),
 		zap.Bool("dry_run", cfg.DryRun),
 	)
 

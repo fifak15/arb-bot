@@ -18,12 +18,14 @@ import (
 
 type Quoter interface {
 	// outUSD — ожидаемая выручка в USDT/USDC (1:1 к USD), gasUSD — оценка газа в USD.
-	QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, err error)
+	QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, feeTier uint32, err error)
+	// inUSD — требуемые затраты в USDT/USDC (1:1 к USD), gasUSD — оценка газа в USD.
+	QuoteDexInUSD(ctx context.Context, qtyBase float64, ethUSD float64) (inUSD float64, gasUSD float64, feeTier uint32, err error)
 }
 
 type Router interface {
-	// amountInWei — количество WETH в wei, minOut — минимальный out в единицах стейблкоина (6 знаков).
-	SwapExactInput(ctx context.Context, amountInWei *big.Int, minOut uint64) (txHash string, err error)
+	SwapExactInput(ctx context.Context, tokenIn, tokenOut common.Address, amountIn *big.Int, minOut *big.Int, feeTier uint32) (txHash string, err error)
+	SwapExactOutput(ctx context.Context, tokenIn, tokenOut common.Address, amountOut *big.Int, maxIn *big.Int, feeTier uint32) (txHash string, err error)
 }
 
 type slot0Quoter struct {
@@ -34,6 +36,7 @@ type slot0Quoter struct {
 	fabi  abi.ABI // Factory (getPool)
 	pabi  abi.ABI // Pool (slot0, token0/1, liquidity)
 	q1abi abi.ABI // QuoterV1 (quoteExactInputSingle)
+	q2abi abi.ABI // QuoterV2
 	pools map[uint32]common.Address
 }
 
@@ -94,15 +97,15 @@ const poolABI = `[
 
 // Quoter V1
 const quoterV1ABI = `[
-  {"inputs":[
-     {"internalType":"address","name":"tokenIn","type":"address"},
-     {"internalType":"address","name":"tokenOut","type":"address"},
-     {"internalType":"uint24","name":"fee","type":"uint24"},
-     {"internalType":"uint256","name":"amountIn","type":"uint256"},
-     {"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],
-   "name":"quoteExactInputSingle",
-   "outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],
-   "stateMutability":"nonpayable","type":"function"}]`
+  {"inputs":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"name":"quoteExactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},
+  {"inputs":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"name":"quoteExactOutputSingle","outputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"}],"stateMutability":"nonpayable","type":"function"}
+]`
+
+// Quoter V2
+const quoterV2ABI = `[
+  {"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct IQuoterV2.QuoteExactInputSingleParams","name":"params","type":"tuple"}],"name":"quoteExactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceX96After","type":"uint160"},{"internalType":"uint32","name":"initializedTicksCrossed","type":"uint32"},{"internalType":"uint256","name":"gasEstimate","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},
+  {"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct IQuoterV2.QuoteExactOutputSingleParams","name":"params","type":"tuple"}],"name":"quoteExactOutputSingle","outputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceX96After","type":"uint160"},{"internalType":"uint32","name":"initializedTicksCrossed","type":"uint32"},{"internalType":"uint256","name":"gasEstimate","type":"uint256"}],"stateMutability":"nonpayable","type":"function"}
+]`
 
 // Конструктор
 func NewSlot0Quoter(cfg *config.Config, log *zap.Logger) (Quoter, error) {
@@ -114,6 +117,7 @@ func NewSlot0Quoter(cfg *config.Config, log *zap.Logger) (Quoter, error) {
 	pabi, _ := abi.JSON(strings.NewReader(poolABI))
 	ercABI, _ := abi.JSON(strings.NewReader(erc20ABI))
 	q1abi, _ := abi.JSON(strings.NewReader(quoterV1ABI))
+	q2abi, _ := abi.JSON(strings.NewReader(quoterV2ABI))
 	return &slot0Quoter{
 		cfg:   cfg,
 		log:   log,
@@ -122,6 +126,7 @@ func NewSlot0Quoter(cfg *config.Config, log *zap.Logger) (Quoter, error) {
 		pabi:  pabi,
 		eabi:  ercABI,
 		q1abi: q1abi,
+		q2abi: q2abi,
 		pools: make(map[uint32]common.Address),
 	}, nil
 }
@@ -158,6 +163,120 @@ func (q *slot0Quoter) quoteExactInputSingleV1(ctx context.Context, fee uint32, a
 	return outs[0].(*big.Int), nil
 }
 
+func (q *slot0Quoter) quoteExactInputSingleV2(ctx context.Context, fee uint32, amountInWei *big.Int) (*big.Int, error) {
+	quoter := common.HexToAddress(q.cfg.DEX.QuoterV2)
+	if quoter == (common.Address{}) {
+		return nil, fmt.Errorf("quoterV2 address not set")
+	}
+	weth := common.HexToAddress(q.cfg.DEX.WETH)
+	usdx := common.HexToAddress(q.cfg.DEX.USDT)
+
+	params := struct {
+		TokenIn           common.Address
+		TokenOut          common.Address
+		AmountIn          *big.Int
+		Fee               uint32
+		SqrtPriceLimitX96 *big.Int
+	}{
+		TokenIn:           weth,
+		TokenOut:          usdx,
+		AmountIn:          amountInWei,
+		Fee:               fee,
+		SqrtPriceLimitX96: big.NewInt(0),
+	}
+
+	input, err := q.q2abi.Pack("quoteExactInputSingle", params)
+	if err != nil {
+		return nil, fmt.Errorf("pack quoterV2: %w", err)
+	}
+
+	from := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
+	msg := ethereum.CallMsg{From: from, To: &quoter, Gas: 2_000_000, Data: input}
+
+	res, err := q.ec.CallContract(ctx, msg, nil)
+	if err != nil {
+		return nil, fmt.Errorf("call quoterV2: %w", err)
+	}
+
+	outs, err := q.q2abi.Methods["quoteExactInputSingle"].Outputs.Unpack(res)
+	if err != nil || len(outs) == 0 {
+		return nil, fmt.Errorf("decode quoterV2: %w", err)
+	}
+	return outs[0].(*big.Int), nil
+}
+
+func (q *slot0Quoter) quoteExactOutputSingleV1(ctx context.Context, fee uint32, amountOutWei *big.Int) (*big.Int, error) {
+	quoter := common.HexToAddress(q.cfg.DEX.QuoterV1)
+	if quoter == (common.Address{}) {
+		return nil, fmt.Errorf("quoterV1 address not set")
+	}
+	weth := common.HexToAddress(q.cfg.DEX.WETH)
+	usdx := common.HexToAddress(q.cfg.DEX.USDT)
+
+	// Note: tokenIn is now USDX, tokenOut is WETH
+	input, err := q.q1abi.Pack("quoteExactOutputSingle",
+		usdx, weth, big.NewInt(int64(fee)), amountOutWei, big.NewInt(0),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("pack quoteExactOutputSingleV1: %w", err)
+	}
+
+	from := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
+	msg := ethereum.CallMsg{From: from, To: &quoter, Gas: 2_000_000, Data: input}
+
+	res, err := q.ec.CallContract(ctx, msg, nil)
+	if err != nil {
+		return nil, fmt.Errorf("call quoteExactOutputSingleV1: %w", err)
+	}
+	outs, err := q.q1abi.Methods["quoteExactOutputSingle"].Outputs.Unpack(res)
+	if err != nil || len(outs) == 0 {
+		return nil, fmt.Errorf("decode quoteExactOutputSingleV1: %w", err)
+	}
+	return outs[0].(*big.Int), nil
+}
+
+func (q *slot0Quoter) quoteExactOutputSingleV2(ctx context.Context, fee uint32, amountOutWei *big.Int) (*big.Int, error) {
+	quoter := common.HexToAddress(q.cfg.DEX.QuoterV2)
+	if quoter == (common.Address{}) {
+		return nil, fmt.Errorf("quoterV2 address not set")
+	}
+	weth := common.HexToAddress(q.cfg.DEX.WETH)
+	usdx := common.HexToAddress(q.cfg.DEX.USDT)
+
+	params := struct {
+		TokenIn           common.Address
+		TokenOut          common.Address
+		Amount            *big.Int
+		Fee               uint32
+		SqrtPriceLimitX96 *big.Int
+	}{
+		TokenIn:           usdx,
+		TokenOut:          weth,
+		Amount:            amountOutWei,
+		Fee:               fee,
+		SqrtPriceLimitX96: big.NewInt(0),
+	}
+
+	input, err := q.q2abi.Pack("quoteExactOutputSingle", params)
+	if err != nil {
+		return nil, fmt.Errorf("pack quoteExactOutputSingleV2: %w", err)
+	}
+
+	from := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
+	msg := ethereum.CallMsg{From: from, To: &quoter, Gas: 2_000_000, Data: input}
+
+	res, err := q.ec.CallContract(ctx, msg, nil)
+	if err != nil {
+		return nil, fmt.Errorf("call quoteExactOutputSingleV2: %w", err)
+	}
+
+	outs, err := q.q2abi.Methods["quoteExactOutputSingle"].Outputs.Unpack(res)
+	if err != nil || len(outs) == 0 {
+		return nil, fmt.Errorf("decode quoteExactOutputSingleV2: %w", err)
+	}
+	return outs[0].(*big.Int), nil
+}
+
 // --- Оценка газа в USD (EIP-1559 aware) ---
 
 func (q *slot0Quoter) estimateGasUSD(ctx context.Context, ethUSD float64) float64 {
@@ -182,9 +301,81 @@ func (q *slot0Quoter) estimateGasUSD(ctx context.Context, ethUSD float64) float6
 
 // --- Публичная котировка ---
 
-func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, err error) {
+func (q *slot0Quoter) QuoteDexInUSD(ctx context.Context, qtyBase float64, ethUSD float64) (inUSD float64, gasUSD float64, feeTier uint32, err error) {
 	if qtyBase <= 0 {
-		return 0, 0, fmt.Errorf("qtyBase must be > 0")
+		return 0, 0, 0, fmt.Errorf("qtyBase must be > 0")
+	}
+	tiers := q.cfg.DEX.FeeTiers
+	if len(tiers) == 0 {
+		tiers = []uint32{500, 3000}
+	}
+
+	// The amount of WETH we want to receive
+	amountOutWei := new(big.Int)
+	new(big.Float).Mul(big.NewFloat(qtyBase), big.NewFloat(1e18)).Int(amountOutWei)
+
+	usdx := common.HexToAddress(q.cfg.DEX.USDT)
+	decUSDX, derr := q.erc20Decimals(ctx, usdx)
+	if derr != nil {
+		return 0, 0, 0, derr
+	}
+
+	var bestIn *big.Int
+	var bestFee uint32
+	var quoterVersion string
+
+	// 1) Try QuoterV2 first
+	if q.cfg.DEX.QuoterV2 != "" {
+		for _, fee := range tiers {
+			amt, e := q.quoteExactOutputSingleV2(ctx, fee, amountOutWei)
+			if e != nil {
+				q.log.Debug("QuoterV2 ExactOutput failed", zap.Uint32("fee", fee), zap.Error(e))
+				continue
+			}
+			// We want the *lowest* input amount
+			if bestIn == nil || amt.Cmp(bestIn) < 0 {
+				bestIn = amt
+				bestFee = fee
+				quoterVersion = "V2"
+			}
+		}
+	}
+
+	// 2) Fallback to QuoterV1
+	if bestIn == nil && q.cfg.DEX.QuoterV1 != "" {
+		for _, fee := range tiers {
+			amt, e := q.quoteExactOutputSingleV1(ctx, fee, amountOutWei)
+			if e != nil {
+				q.log.Debug("QuoterV1 ExactOutput failed", zap.Uint32("fee", fee), zap.Error(e))
+				continue
+			}
+			if bestIn == nil || amt.Cmp(bestIn) < 0 {
+				bestIn = amt
+				bestFee = fee
+				quoterVersion = "V1"
+			}
+		}
+	}
+
+	if bestIn != nil {
+		human := new(big.Float).Quo(new(big.Float).SetInt(bestIn), big.NewFloat(math.Pow10(decUSDX)))
+		inUSD, _ = human.Float64()
+		q.log.Info("DEX quote selected (exact output)",
+			zap.String("quoter", quoterVersion),
+			zap.Uint32("fee", bestFee),
+			zap.String("amount_in_raw", bestIn.String()),
+			zap.Float64("amount_in_human", inUSD),
+		)
+		return inUSD, q.estimateGasUSD(ctx, ethUSD), bestFee, nil
+	}
+
+	q.log.Error("Could not get an exact_output quote from any quoter")
+	return 0, 0, 0, fmt.Errorf("no working quoter found for any fee tier (exact output)")
+}
+
+func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, feeTier uint32, err error) {
+	if qtyBase <= 0 {
+		return 0, 0, 0, fmt.Errorf("qtyBase must be > 0")
 	}
 	tiers := q.cfg.DEX.FeeTiers
 	if len(tiers) == 0 {
@@ -195,66 +386,64 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 		}
 	}
 
-	// qtyBase ETH -> wei
 	amountInWei := new(big.Int)
 	new(big.Float).Mul(big.NewFloat(qtyBase), big.NewFloat(1e18)).Int(amountInWei)
 
-	// decimals стейбла (USDX)
 	usdx := common.HexToAddress(q.cfg.DEX.USDT)
 	decUSDX, derr := q.erc20Decimals(ctx, usdx)
 	if derr != nil {
-		return 0, 0, derr
+		return 0, 0, 0, derr
 	}
 
-	// 1) Пробуем Quoter V1 по всем fee и берём лучший amountOut
 	var bestOut *big.Int
-	for _, fee := range tiers {
-		amt, e := q.quoteExactInputSingleV1(ctx, fee, amountInWei)
-		if e != nil {
-			q.log.Warn("QuoterV1: не удалось получить котировку", zap.Uint32("fee", fee), zap.Error(e))
-			continue
+	var bestFee uint32
+	var quoterVersion string
+
+	if q.cfg.DEX.QuoterV2 != "" {
+		for _, fee := range tiers {
+			amt, e := q.quoteExactInputSingleV2(ctx, fee, amountInWei)
+			if e != nil {
+				q.log.Debug("QuoterV2 failed", zap.Uint32("fee", fee), zap.Error(e))
+				continue
+			}
+			if bestOut == nil || amt.Cmp(bestOut) > 0 {
+				bestOut = amt
+				bestFee = fee
+				quoterVersion = "V2"
+			}
 		}
-		if bestOut == nil || amt.Cmp(bestOut) > 0 {
-			bestOut = amt
+	}
+
+	if bestOut == nil && q.cfg.DEX.QuoterV1 != "" {
+		for _, fee := range tiers {
+			amt, e := q.quoteExactInputSingleV1(ctx, fee, amountInWei)
+			if e != nil {
+				q.log.Debug("QuoterV1 failed", zap.Uint32("fee", fee), zap.Error(e))
+				continue
+			}
+			if bestOut == nil || amt.Cmp(bestOut) > 0 {
+				bestOut = amt
+				bestFee = fee
+				quoterVersion = "V1"
+			}
 		}
 	}
 
 	if bestOut != nil {
 		human := new(big.Float).Quo(new(big.Float).SetInt(bestOut), big.NewFloat(math.Pow10(decUSDX)))
 		outUSD, _ = human.Float64()
-		q.log.Info("DEX-котировка (Quoter V1) выбрана",
+		q.log.Info("DEX quote selected",
+			zap.String("quoter", quoterVersion),
+			zap.Uint32("fee", bestFee),
 			zap.String("amount_out_raw", bestOut.String()),
-			zap.Int("usdx_decimals", decUSDX),
 			zap.Float64("amount_out_human", outUSD),
 		)
-		return outUSD, q.estimateGasUSD(ctx, ethUSD), nil
+		return outUSD, q.estimateGasUSD(ctx, ethUSD), bestFee, nil
 	}
 
-	// 2) Фоллбек: расчёт по slot0
-	var lastErr error
-	for _, tier := range tiers {
-		pool, e := q.getPool(ctx, tier)
-		if e != nil || (pool == (common.Address{})) {
-			lastErr = fmt.Errorf("getPool fee %d: %w", tier, e)
-			continue
-		}
-		usdxPerWeth, e := q.readSpotUSDXPerWETH(ctx, pool)
-		if e != nil {
-			lastErr = fmt.Errorf("slot0 fee %d: %w", tier, e)
-			continue
-		}
-		outUSD = qtyBase * usdxPerWeth
-		q.log.Info("DEX-котировка (slot0) выбрана", zap.Uint32("fee", tier), zap.Float64("out_usd", outUSD))
-		return outUSD, q.estimateGasUSD(ctx, ethUSD), nil
-	}
-
-	if lastErr != nil {
-		return 0, 0, lastErr
-	}
-	return 0, 0, fmt.Errorf("no working fee tier")
+	q.log.Error("Could not get a quote from any quoter")
+	return 0, 0, 0, fmt.Errorf("no working quoter found for any fee tier")
 }
-
-// --- Factory getPool (+ проверка ликвидности) ---
 
 func (q *slot0Quoter) getPool(ctx context.Context, fee uint32) (common.Address, error) {
 	if addr, ok := q.pools[fee]; ok && addr != (common.Address{}) {
