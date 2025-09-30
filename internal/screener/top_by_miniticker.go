@@ -10,17 +10,17 @@ import (
 
 type MiniTick struct {
 	Symbol string
-	Price  float64 // last price (для USDT-пар — в USDT)
-	Vol    float64 // 24h volume (в базовой монете)
+	Price  float64
+	Vol    float64
 	TS     time.Time
 }
 
 type PairInfo struct {
-	Symbol      string // e.g. "ABCUSDT"
-	Base        string // e.g. "ABC"
-	Quote       string // e.g. "USDT"
+	Symbol      string
+	Base        string
+	Quote       string
 	Rank        int
-	ContractETH string // ERC-20 (если есть)
+	ContractETH string
 	CoinGeckoID string
 }
 
@@ -40,7 +40,7 @@ func (r *VolRanker) Ingest(t MiniTick) {
 	if t.Price <= 0 || t.Vol <= 0 || math.IsNaN(t.Price) || math.IsNaN(t.Vol) {
 		return
 	}
-	qv := t.Vol * t.Price // переводим базовый объём в квотируемый USDT
+	qv := t.Vol * t.Price
 	r.mu.Lock()
 	r.qv[strings.ToUpper(t.Symbol)] = qv
 	r.mu.Unlock()

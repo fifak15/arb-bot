@@ -100,12 +100,10 @@ collect:
 	}
 	selected := all[start:end]
 
-	// печать рейтинга (опционально)
 	for i, v := range selected {
 		fmt.Printf("%2d) %-12s qv=%s\n", fromRank+i, v.Symbol, human(v.QV))
 	}
 
-	// 3) получаем PairInfo и адреса Arbitrum One через CoinGecko Pro
 	pairs := make([]screener.PairInfo, 0, len(selected))
 	for i, s := range selected {
 		base := s.Symbol[:len(s.Symbol)-4] // ...USDT
@@ -124,7 +122,6 @@ collect:
 		fmt.Printf("%2d) %-12s base=%-8s arb=%s (cg:%s)\n", p.Rank, p.Symbol, p.Base, p.ContractETH, p.CoinGeckoID)
 	}
 
-	// 4) подписываемся на bookTicker только по выбранным 15 символам
 	syms := make([]string, 0, len(pairs))
 	for _, p := range pairs {
 		syms = append(syms, p.Symbol)
