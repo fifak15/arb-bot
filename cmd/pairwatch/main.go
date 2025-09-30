@@ -2,12 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"math/big"
+	"net/http"
 	"os"
 	"os/signal"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,27 +20,33 @@ import (
 	"github.com/you/arb-bot/internal/screener"
 )
 
+type t24 struct {
+	Symbol      string `json:"symbol"`
+	LastPrice   string `json:"lastPrice"`
+	Volume      string `json:"volume"`
+	QuoteVolume string `json:"quoteVolume"`
+}
+
 func main() {
+	// ---- flags ----
 	var wsURL string
+	var fromRank int
+	var toRank int
+	var pick int
 	var cgKey string
-	var warmupSec int
-	var fromRank, toRank int
 	var logEverySec int
 	var cgVerbose bool
 
 	flag.StringVar(&wsURL, "mexc-ws", "wss://wbs-api.mexc.com/ws", "MEXC WS url")
+	flag.IntVar(&fromRank, "from", 100, "начальный ранг (включительно)")
+	flag.IntVar(&toRank, "to", 600, "конечный ранг (включительно)")
+	flag.IntVar(&pick, "pick", 15, "сколько случайных пар выбрать")
 	flag.StringVar(&cgKey, "cg-key", "CG-6xYAcpo3zeBewP95hk2UksPK", "CoinGecko Pro/Demo API key")
-	flag.IntVar(&warmupSec, "warmup", 120, "секунд сбор мини-тиков (warmup)")
-	flag.IntVar(&fromRank, "from", 20, "начальный ранг (включительно)")
-	flag.IntVar(&toRank, "to", 35, "конечный ранг (включительно)")
-	flag.IntVar(&logEverySec, "log-every", 25, "интервал логов на символ после формирования топа, сек")
-	flag.BoolVar(&cgVerbose, "cg-verbose", true, "подробные логи CoinGecko (внутри screener)")
+	flag.IntVar(&logEverySec, "log-every", 20, "троттлинг логов для каждого символа, сек")
+	flag.BoolVar(&cgVerbose, "cg-verbose", false, "подробные логи CoinGecko")
 	flag.Parse()
 
-	// прокинем подробность логов CG в пакет screener
 	screener.CGVerbose = cgVerbose
-
-	logEvery := time.Duration(logEverySec) * time.Second
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -43,203 +54,115 @@ func main() {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 		<-ch
-		fmt.Println("[sys] получен сигнал завершения — останавливаемся…")
+		fmt.Println("[sys] сигнал завершения — выходим…")
 		cancel()
 	}()
 
-	// --- WS #1: miniTickers ---
-	fmt.Printf("[mini] старт прогрева на %d сек…\n", warmupSec)
-	warmupStarted := time.Now()
-
-	mini := mexc.NewMiniWS(wsURL)
-	mtc, errs, err := mini.SubscribeMiniTickers(ctx)
+	// ---- 1) REST /ticker/24hr ----
+	fmt.Println("[mexc] GET /api/v3/ticker/24hr …")
+	tickers, err := fetchTicker24h(ctx)
 	if err != nil {
 		panic(err)
 	}
-	r := screener.NewVolRanker()
-	warmup := time.NewTimer(time.Duration(warmupSec) * time.Second)
-
-	// Прогрев: печатаем каждый miniTick и кормим ранжировщик
-collect:
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case e := <-errs:
-			fmt.Printf("[mini] ошибка потока: %v\n", e)
-			return
-		case t := <-mtc:
-			ts := time.UnixMilli(t.SendTime)
-			fmt.Printf("[mini] пара=%s время=%s цена=%s объём=%s макс=%s мин=%s изм=%s\n",
-				t.Symbol, ts.Format(time.RFC3339), t.Price, t.Volume, t.High, t.Low, t.Rate)
-
-			price, perr := strconv.ParseFloat(t.Price, 64)
-			vol, verr := strconv.ParseFloat(t.Volume, 64)
-			if perr != nil || verr != nil {
-				fmt.Printf("[mini] ошибка парсинга: пара=%s цена=%q err=%v объём=%q err=%v\n",
-					t.Symbol, t.Price, perr, t.Volume, verr)
-				break
-			}
-			r.Ingest(screener.MiniTick{
-				Symbol: t.Symbol,
-				Price:  price,
-				Vol:    vol,
-				TS:     ts,
-			})
-		case <-warmup.C:
-			break collect
-		}
-	}
-
-	all := r.TopAll()
-	warmupDur := time.Since(warmupStarted).Truncate(time.Millisecond)
-	if len(all) == 0 {
-		fmt.Printf("[mini] прогрев завершён за %s — данных нет\n", warmupDur)
+	if len(tickers) == 0 {
+		fmt.Println("[mexc] пустой ответ по тикерам")
 		return
 	}
-	fmt.Printf("[mini] прогрев завершён за %s — собрано %d символов\n", warmupDur, len(all))
-	// mini НЕ закрываем — ниже переведём его в «редкий» лог
 
-	// --- Ранги 50..65 (информационный вывод) ---
-	fmt.Println("[rank] формируем срез по квотному объёму…")
-	sort.Slice(all, func(i, j int) bool { return all[i].QV > all[j].QV })
+	// оставить только ...USDT, посчитать quoteVolume (fallback), отсортировать
+	type row struct {
+		Sym string
+		QV  float64
+		LP  float64
+		Vol float64
+	}
+	rows := make([]row, 0, len(tickers))
+	for _, r := range tickers {
+		sym := strings.ToUpper(strings.TrimSpace(r.Symbol))
+		if !strings.HasSuffix(sym, "USDT") {
+			continue
+		}
+		lp := toF(r.LastPrice)
+		vol := toF(r.Volume)
+		qv := toF(r.QuoteVolume)
+		if !isFinite(qv) && isFinite(lp) && isFinite(vol) && lp > 0 && vol > 0 {
+			qv = lp * vol
+		}
+		if !isFinite(qv) || qv <= 0 {
+			continue
+		}
+		rows = append(rows, row{Sym: sym, QV: qv, LP: lp, Vol: vol})
+	}
+	if len(rows) == 0 {
+		fmt.Println("[mexc] нет USDT-пар с валидным quoteVolume")
+		return
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].QV > rows[j].QV })
+
+	// срез [from..to]
+	if fromRank < 1 {
+		fromRank = 1
+	}
 	start := fromRank - 1
-	if start < 0 {
-		start = 0
+	if start > len(rows) {
+		start = len(rows)
 	}
 	end := toRank
-	if end > len(all) {
-		end = len(all)
+	if end > len(rows) {
+		end = len(rows)
 	}
-	if start >= end {
-		fmt.Println("[rank] диапазон рангов вне границ — остановка")
+	window := rows[start:end]
+	fmt.Printf("[rank] окно %d..%d: всего %d пар\n", fromRank, toRank, len(window))
+	if len(window) == 0 {
 		return
 	}
-	selected := all[start:end]
-	for i, v := range selected {
-		fmt.Printf("[rank] %2d) %-12s квотный_объём=%s\n", fromRank+i, v.Symbol, human(v.QV))
+
+	// ---- 2) индекс CoinGecko arbitrum-one ----
+	if cgKey == "" {
+		fmt.Println("[cg] предупреждение: ключ не задан — запрос может быть ограничен по rate-limit")
+	}
+	fmt.Println("[cg] строим индекс arbitrum-one…")
+	idx, err := screener.FetchArbitrumIndex(ctx, cgKey) // /coins/list?include_platform=true
+	if err != nil {
+		fmt.Printf("[cg] ошибка индекса: %v\n", err)
+		return
 	}
 
-	// --- Готовим пары и обогащаем через CoinGecko ---
-	fmt.Println("[cg] начинаем обогащение адресами (arbitrum-one)…")
-	pairs := make([]screener.PairInfo, 0, len(selected))
-	for i, s := range selected {
-		base := s.Symbol[:len(s.Symbol)-4] // …USDT
+	// ---- 3) подготовить пары и 4) обогатить + фильтр arbitrum-one ----
+	pairs := make([]screener.PairInfo, 0, len(window))
+	for i, r := range window {
+		base := strings.TrimSuffix(r.Sym, "USDT")
 		pairs = append(pairs, screener.PairInfo{
-			Symbol: s.Symbol, Base: base, Quote: "USDT", Rank: fromRank + i,
+			Symbol: r.Sym, Base: base, Quote: "USDT", Rank: fromRank + i,
 		})
 	}
-	enrichStart := time.Now()
-	if cgKey != "" {
-		if enriched, err := screener.EnrichPairsArbitrum(ctx, pairs, cgKey); err == nil {
-			pairs = enriched
-		} else {
-			fmt.Printf("[cg] ошибка обогащения (базовый срез): %v\n", err)
-		}
-	} else {
-		fmt.Println("[cg] ключ не задан — пропускаем запросы к CoinGecko")
-	}
-
-	found := make([]screener.PairInfo, 0, 15)
-	for _, p := range pairs {
-		if p.ContractETH != "" {
-			found = append(found, p)
+	enriched := screener.EnrichPairsFromIndex(pairs, idx) // без сетевых вызовов
+	withArb := enriched[:0]
+	for _, p := range enriched {
+		if strings.TrimSpace(p.ContractETH) != "" {
+			withArb = append(withArb, p)
 		}
 	}
-	fmt.Printf("[cg] обогащение завершено за %s — найдено адресов: %d из %d\n",
-		time.Since(enrichStart).Truncate(time.Millisecond), len(found), len(pairs))
-
-	// --- Если не набрали 15 адресов, досканируем вниз по рейтингу ---
-	target := 15
-	if len(found) < target && cgKey != "" {
-		fmt.Printf("[cg] нужно %d адресов, найдено %d — начинаем доскан вниз по рейтингу…\n", target, len(found))
-		scanPos := end
-		batch := 30
-		scanned := 0
-		backfillStart := time.Now()
-
-		for len(found) < target && scanPos < len(all) {
-			j := scanPos + batch
-			if j > len(all) {
-				j = len(all)
-			}
-			window := all[scanPos:j]
-
-			cand := make([]screener.PairInfo, 0, len(window))
-			for i, e := range window {
-				base := e.Symbol[:len(e.Symbol)-4]
-				cand = append(cand, screener.PairInfo{
-					Symbol: e.Symbol, Base: base, Quote: "USDT", Rank: scanPos + 1 + i,
-				})
-			}
-
-			fmt.Printf("[cg] доскан батч %d..%d (всего %d шт.)…\n", scanPos+1, j, len(window))
-			enr, err := screener.EnrichPairsArbitrum(ctx, cand, cgKey)
-			if err != nil {
-				fmt.Printf("[cg] ошибка обогащения (доскан @%d..%d): %v\n", scanPos+1, j, err)
-			}
-			addedThisBatch := 0
-			for _, p := range enr {
-				if p.ContractETH != "" {
-					found = append(found, p)
-					addedThisBatch++
-					if len(found) == target {
-						break
-					}
-				}
-			}
-			fmt.Printf("[cg] доскан батч %d..%d: добавлено %d адрес(ов); суммарно %d/%d\n",
-				scanPos+1, j, addedThisBatch, len(found), target)
-
-			scanned += len(window)
-			scanPos = j
-		}
-		fmt.Printf("[cg] доскан завершён за %s; просмотрено доп. символов: %d; итог адресов: %d\n",
-			time.Since(backfillStart).Truncate(time.Millisecond), scanned, len(found))
-	}
-
-	if len(found) == 0 {
-		fmt.Println("[cg] в рейтинге не найдено ни одного адреса arbitrum-one — завершение")
+	fmt.Printf("[cg] после фильтра arbitrum-one: %d из %d\n", len(withArb), len(enriched))
+	if len(withArb) == 0 {
+		fmt.Println("[cg] адресов arbitrum-one не найдено в выбранном окне")
 		return
 	}
-	if len(found) > target {
-		found = found[:target]
-	}
 
-	fmt.Printf("[final] выбрано %d пар с адресами Arbitrum One (исходный диапазон %d..%d):\n", len(found), fromRank, toRank)
-	for _, p := range found {
-		fmt.Printf("[final] %3d) %-12s базовый=%-8s адрес=%s (cg:%s)\n",
+	if pick > len(withArb) {
+		pick = len(withArb)
+	}
+	sample := cryptShuffle(withArb)
+	sample = sample[:pick]
+
+	fmt.Printf("[final] выбрано случайных %d пар с адресами Arbitrum One:\n", len(sample))
+	for _, p := range sample {
+		fmt.Printf("[final] %3d) %-12s base=%-10s addr=%s (cg:%s)\n",
 			p.Rank, p.Symbol, p.Base, p.ContractETH, p.CoinGeckoID)
 	}
 
-	// --- После формирования топа: троттлим логи mini по каждому символу ---
-	fmt.Printf("[mini] включён редкий лог по mini: не чаще 1 сообщения на символ каждые %ds\n", logEverySec)
-	miniLast := make(map[string]time.Time)
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case e := <-errs:
-				fmt.Printf("[mini] ошибка потока: %v\n", e)
-				return
-			case t := <-mtc:
-				now := time.Now()
-				if last, ok := miniLast[t.Symbol]; ok && now.Sub(last) < logEvery {
-					continue
-				}
-				miniLast[t.Symbol] = now
-
-				ts := time.UnixMilli(t.SendTime)
-				fmt.Printf("[mini] пара=%s время=%s цена=%s объём=%s макс=%s мин=%s изм=%s\n",
-					t.Symbol, ts.Format(time.RFC3339), t.Price, t.Volume, t.High, t.Low, t.Rate)
-			}
-		}
-	}()
-
-	// --- WS #2: подписка по выбранным символам (только с адресами) ---
-	syms := make([]string, 0, len(found))
-	for _, p := range found {
+	syms := make([]string, 0, len(sample))
+	for _, p := range sample {
 		syms = append(syms, p.Symbol)
 	}
 	fmt.Printf("[book] подписка на %d символов: %v\n", len(syms), syms)
@@ -249,41 +172,69 @@ collect:
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println("[book] поток bookTicker запущен; применяется троттлинг по", logEvery)
+	logEvery := time.Duration(logEverySec) * time.Second
+	last := make(map[string]time.Time)
 
-	// троттлинг логов bookTicker по каждому символу
-	bookLast := make(map[string]time.Time)
-
+	fmt.Println("[book] поток запущен; троттлинг логов =", logEvery)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case t := <-stream:
 			now := time.Now()
-			if last, ok := bookLast[t.Symbol]; ok && now.Sub(last) < logEvery {
+			if prev, ok := last[t.Symbol]; ok && now.Sub(prev) < logEvery {
 				continue
 			}
-			bookLast[t.Symbol] = now
-
-			fmt.Printf("[book] %s  %s  bid=%f  ask=%f  спрэд=%f%%\n",
-				t.TS.Format(time.RFC3339), t.Symbol, t.Bid, t.Ask,
-				((t.Ask-t.Bid)/((t.Ask+t.Bid)/2))*100,
-			)
+			last[t.Symbol] = now
+			mid := (t.Bid + t.Ask) / 2
+			spread := 0.0
+			if mid > 0 {
+				spread = (t.Ask - t.Bid) / mid * 100
+			}
+			fmt.Printf("[book] %s  %-12s bid=%.8f ask=%.8f spread=%.4f%%\n",
+				t.TS.Format(time.RFC3339), t.Symbol, t.Bid, t.Ask, spread)
 		}
 	}
 }
 
-func human(v float64) string {
-	switch {
-	case v >= 1e12:
-		return strconv.FormatFloat(v/1e12, 'f', 2, 64) + "T"
-	case v >= 1e9:
-		return strconv.FormatFloat(v/1e9, 'f', 2, 64) + "B"
-	case v >= 1e6:
-		return strconv.FormatFloat(v/1e6, 'f', 2, 64) + "M"
-	case v >= 1e3:
-		return strconv.FormatFloat(v/1e3, 'f', 2, 64) + "K"
-	default:
-		return strconv.FormatFloat(v, 'f', 2, 64)
+func fetchTicker24h(ctx context.Context) ([]t24, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://api.mexc.com/api/v3/ticker/24hr", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
 	}
+	defer resp.Body.Close()
+	var arr []t24
+	if err := json.NewDecoder(resp.Body).Decode(&arr); err != nil {
+		return nil, err
+	}
+	return arr, nil
+}
+
+func toF(s string) float64 {
+	f, _ := strconv.ParseFloat(s, 64)
+	return f
+}
+
+func isFinite(f float64) bool { return !((f != f) || (f > 1e308) || (f < -1e308)) }
+
+func cryptShuffle[T any](in []T) []T {
+	out := make([]T, len(in))
+	copy(out, in)
+	for i := len(out) - 1; i > 0; i-- {
+		j := crandInt(i + 1)
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
+}
+
+func crandInt(n int) int {
+	if n <= 1 {
+		return 0
+	}
+	bi, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		return 0
+	}
+	return int(bi.Int64())
 }

@@ -27,17 +27,7 @@ func vprintf(format string, args ...any) {
 	}
 }
 
-type cgSearchResp2 struct {
-	Coins []struct {
-		ID     string `json:"id"`
-		Symbol string `json:"symbol"`
-		Name   string `json:"name"`
-	} `json:"coins"`
-}
-
-type cgCoinResp2 struct {
-	Platforms map[string]string `json:"platforms"`
-}
+// ---------- Общие структуры / утилиты ----------
 
 type cgHTTPError struct {
 	Status        int
@@ -59,8 +49,8 @@ func newCGHTTPError(resp *http.Response, body []byte) *cgHTTPError {
 		Status:        resp.StatusCode,
 		URL:           resp.Request.URL.String(),
 		Body:          strings.TrimSpace(msg),
-		WrongRootPro:  resp.StatusCode == 400 && strings.Contains(lmsg, "pro-api.coingecko.com"),                                                                                             // 10010
-		WrongRootDemo: resp.StatusCode == 400 && (strings.Contains(lmsg, "demo api key") || strings.Contains(lmsg, "change your root url  from pro-api.coingecko.com to api.coingecko.com")), // 10011
+		WrongRootPro:  resp.StatusCode == 400 && strings.Contains(lmsg, "pro-api.coingecko.com"),
+		WrongRootDemo: resp.StatusCode == 400 && (strings.Contains(lmsg, "demo api key") || strings.Contains(lmsg, "change your root url  from pro-api.coingecko.com to api.coingecko.com")),
 		RateLimited:   resp.StatusCode == 429 || strings.Contains(lmsg, "throttled"),
 	}
 }
@@ -112,17 +102,30 @@ func httpDoJSON[T any](cli *http.Client, req *http.Request, v *T) error {
 	return nil
 }
 
+// ---------- Точечная логика (fallback): /search + /coins/{id} ----------
+
+type cgSearchResp2 struct {
+	Coins []struct {
+		ID     string `json:"id"`
+		Symbol string `json:"symbol"`
+		Name   string `json:"name"`
+	} `json:"coins"`
+}
+
+type cgCoinResp2 struct {
+	Platforms map[string]string `json:"platforms"`
+}
+
+// ResolveArbitrumAddr — старый точечный путь, оставляем как fallback.
 func ResolveArbitrumAddr(ctx context.Context, baseSymbol, apiKey string) (id string, arb string, err error) {
 	cli := &http.Client{Timeout: 10 * time.Second}
 
-	// ВАЖНО: всегда стартуем с demo-домена; переключаемся по ошибкам 10010/10011.
 	isPro := false
 	base := cgBaseDemo
 
 	vprintf("[cg] >>> resolve start: symbol=%s mode=%s base=%s\n",
 		baseSymbol, map[bool]string{true: "pro", false: "demo"}[isPro], base)
 
-	// 1) /search — список кандидатов, с авто-переключением домена
 	var sr cgSearchResp2
 searchTry:
 	{
@@ -160,13 +163,6 @@ searchTry:
 		return "", "", fmt.Errorf("coingecko id not found for %s", baseSymbol)
 	}
 
-	vprintf("[cg] search: найдено %d кандидат(ов) для %q\n", len(sr.Coins), baseSymbol)
-	for i := 0; i < len(sr.Coins) && i < 10; i++ {
-		c := sr.Coins[i]
-		vprintf("    #%d id=%s symbol=%s name=%s\n", i+1, c.ID, c.Symbol, c.Name)
-	}
-
-	// Сортировка кандидатов
 	baseLower := strings.ToLower(baseSymbol)
 	type candT struct{ ID, Symbol, Name string }
 	cand := make([]candT, 0, len(sr.Coins))
@@ -181,9 +177,7 @@ searchTry:
 		}
 		return strings.Contains(strings.ToLower(cand[i].Name), baseLower)
 	})
-	vprintf("[cg] search: после сортировки первым идёт id=%s (symbol=%s, name=%s)\n", cand[0].ID, cand[0].Symbol, cand[0].Name)
 
-	// 2) Перебираем до 5 кандидатов и ищем platforms["arbitrum-one"]
 	const maxProbe = 5
 	var firstID string
 	for k, c := range cand {
@@ -242,14 +236,6 @@ searchTry:
 			}
 		}
 
-		// Полный список платформ
-		if len(cr.Platforms) == 0 {
-			vprintf("[cg] id=%s platforms=<empty>\n", c.ID)
-		} else {
-			plist := keys(cr.Platforms)
-			vprintf("[cg] id=%s platforms=%v\n", c.ID, plist)
-		}
-
 		if raw := strings.TrimSpace(cr.Platforms["arbitrum-one"]); raw != "" {
 			cs, e := toChecksumAddress(raw)
 			if e != nil {
@@ -260,32 +246,143 @@ searchTry:
 			return c.ID, cs, nil
 		}
 
-		vprintf("[cg] id=%s — arbitrum-one отсутствует, продолжаем перебор\n", c.ID)
-
 		if k+1 >= maxProbe {
-			vprintf("[cg] достигнут лимит попыток (%d)\n", maxProbe)
 			break
 		}
 		time.Sleep(120 * time.Millisecond)
 	}
 
-	// Никого не нашли — вернём первый id, но без адреса (как раньше)
-	vprintf("[cg] для символа %q адрес arbitrum-one не найден; возвращаем firstID=%s, addr=<none>\n", baseSymbol, firstID)
 	return firstID, "", nil
 }
 
-func keys(m map[string]string) []string {
-	ks := make([]string, 0, len(m))
-	for k := range m {
-		ks = append(ks, k)
-	}
-	sort.Strings(ks)
-	return ks
+// ---------- Новый быстрый путь: /coins/list?include_platform=true ----------
+
+type cgListCoin struct {
+	ID        string            `json:"id"`
+	Symbol    string            `json:"symbol"`
+	Name      string            `json:"name"`
+	Platforms map[string]string `json:"platforms"`
 }
 
-func EnrichPairsArbitrum(ctx context.Context, pairs []PairInfo, cgProKey string) ([]PairInfo, error) {
+type ArbInfo struct {
+	ID     string
+	AddrCS string // checksum
+}
+
+// FetchArbitrumIndex тянет единым запросом список коинов с платформами,
+// фильтрует по "arbitrum-one" и возвращает индекс по символу (lowercase).
+func FetchArbitrumIndex(ctx context.Context, apiKey string) (map[string]ArbInfo, error) {
+	cli := &http.Client{Timeout: 25 * time.Second}
+
+	// начинаем с demo, авто-переключение по 10010/10011
+	base := cgBaseDemo
+	isPro := false
+
+	path := "/coins/list?include_platform=true"
+
+	var coins []cgListCoin
+listTry:
+	{
+		req, err := makeReq(ctx, base, path, apiKey, isPro)
+		if err != nil {
+			return nil, err
+		}
+		err = httpDoJSON(cli, req, &coins)
+		if err != nil {
+			var he *cgHTTPError
+			if errors.As(err, &he) {
+				if he.WrongRootPro {
+					vprintf("[cg] list WrongRoot(10010) → переключаемся на %s и повторяем\n", cgBasePro)
+					base, isPro = cgBasePro, true
+					coins = nil
+					goto listTry
+				}
+				if he.WrongRootDemo {
+					vprintf("[cg] list WrongRoot(10011) → переключаемся на %s и повторяем\n", cgBaseDemo)
+					base, isPro = cgBaseDemo, false
+					coins = nil
+					goto listTry
+				}
+				// Пара мягких ретраев на 429/5xx
+				if he.RateLimited || he.Status >= 500 {
+					for a := 1; a <= 3; a++ {
+						backoff := time.Duration(300*a) * time.Millisecond
+						vprintf("[cg] list retry #%d после %s (status=%d)\n", a, backoff, he.Status)
+						time.Sleep(backoff)
+						req2, _ := makeReq(ctx, base, path, apiKey, isPro)
+						if err = httpDoJSON(cli, req2, &coins); err == nil {
+							break
+						}
+					}
+					if err != nil {
+						return nil, err
+					}
+				} else {
+					return nil, err
+				}
+			} else {
+				return nil, err
+			}
+		}
+	}
+
+	vprintf("[cg] list: получено монет=%d — строим индекс arbitrum-one…\n", len(coins))
+
+	idx := make(map[string]ArbInfo, 4096)
+	added := 0
+	for _, c := range coins {
+		if c.Platforms == nil {
+			continue
+		}
+		raw := strings.TrimSpace(c.Platforms["arbitrum-one"])
+		if raw == "" {
+			continue
+		}
+		cs, err := toChecksumAddress(raw)
+		if err != nil {
+			if CGVerbose {
+				fmt.Printf("[cg] list skip id=%s symbol=%s addr_invalid=%q err=%v\n", c.ID, c.Symbol, raw, err)
+			}
+			continue
+		}
+		key := strings.ToLower(c.Symbol)
+		// если несколько id на один символ — оставляем первый «встретившийся»
+		if _, exists := idx[key]; !exists {
+			idx[key] = ArbInfo{ID: c.ID, AddrCS: cs}
+			added++
+		}
+	}
+
+	vprintf("[cg] list: собрано адресов arbitrum-one=%d (уникальные символы)\n", added)
+	return idx, nil
+}
+
+// Применяем готовый индекс к слайсу пар (без сетевых запросов)
+func EnrichPairsFromIndex(pairs []PairInfo, idx map[string]ArbInfo) []PairInfo {
 	out := make([]PairInfo, 0, len(pairs))
-	vprintf("[cg] === старт обогащения %d пар (arbitrum-one) ===\n", len(pairs))
+	found := 0
+	for _, p := range pairs {
+		key := strings.ToLower(p.Base)
+		if ai, ok := idx[key]; ok {
+			p.CoinGeckoID = ai.ID
+			p.ContractETH = ai.AddrCS
+			found++
+			if CGVerbose {
+				fmt.Printf("[cg] idx ✓ %s → id=%s addr=%s\n", p.Base, ai.ID, ai.AddrCS)
+			}
+		} else if CGVerbose {
+			fmt.Printf("[cg] idx ✗ %s → не найдено в индексе\n", p.Base)
+		}
+		out = append(out, p)
+	}
+	vprintf("[cg] idx применён: найдено адресов=%d из %d\n", found, len(pairs))
+	return out
+}
+
+// Fallback-обогащение (точечные запросы). Сохранил для совместимости.
+func EnrichPairsArbitrum(ctx context.Context, pairs []PairInfo, cgKey string) ([]PairInfo, error) {
+	out := make([]PairInfo, 0, len(pairs))
+	vprintf("[cg] === старт обогащения %d пар (arbitrum-one, точечные запросы) ===\n", len(pairs))
 	found := 0
 	for i, p := range pairs {
 		select {
@@ -297,12 +394,12 @@ func EnrichPairsArbitrum(ctx context.Context, pairs []PairInfo, cgProKey string)
 		vprintf("[cg] [%2d/%2d] symbol=%-12s base=%-8s rank=%d → запрос id/адреса\n",
 			i+1, len(pairs), p.Symbol, p.Base, p.Rank)
 
-		id, addr, err := ResolveArbitrumAddr(ctx, p.Base, cgProKey)
+		id, addr, err := ResolveArbitrumAddr(ctx, p.Base, cgKey)
 		if err != nil {
 			fmt.Printf("[cg] base=%s ошибка resolve: %v\n", p.Base, err)
 		}
 		p.CoinGeckoID = id
-		p.ContractETH = addr // уже checksum (или пусто)
+		p.ContractETH = addr // checksum (или пусто)
 
 		if addr != "" {
 			found++
@@ -320,7 +417,6 @@ func EnrichPairsArbitrum(ctx context.Context, pairs []PairInfo, cgProKey string)
 	return out, nil
 }
 
-// вспомогательное: усечение длинных тел ошибок
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -329,12 +425,4 @@ func truncate(s string, n int) string {
 		return s[:n]
 	}
 	return s[:n-3] + "..."
-}
-
-// вспомогательное: min
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
