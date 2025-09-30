@@ -95,7 +95,7 @@ func Run(
 			)
 
 			imetrics.DexOutUSD.Set(dexOut)
-			imetrics.GasUSD.Set(gasSell) // Note: using sell gas for generic metric
+			imetrics.GasUSD.Set(gasSell)
 
 			snap := Snapshot{
 				BestAskCEX:     ask,

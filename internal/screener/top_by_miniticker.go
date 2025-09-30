@@ -22,6 +22,7 @@ type PairInfo struct {
 	Rank        int
 	ContractETH string
 	CoinGeckoID string
+	Platform    string
 }
 
 type VolRanker struct {
