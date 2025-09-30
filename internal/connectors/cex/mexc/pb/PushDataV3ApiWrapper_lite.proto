@@ -1,19 +1,22 @@
 syntax = "proto3";
+
 package pb;
-
-import "PublicAggreBookTickerV3Api.proto";
-
 option go_package = "github.com/you/arb-bot/internal/connectors/cex/mexc/pb;pb";
 
+import "PublicAggreBookTickerV3Api.proto";
+import "PublicMiniTickersV3Api.proto";
+
+// Обёртка, которую присылает MEXC WS в бинарном protobuf
 message PushDataV3ApiWrapper {
   string channel = 1;
 
   oneof body {
     PublicAggreBookTickerV3Api publicAggreBookTicker = 315;
+    PublicMiniTickersV3Api     publicMiniTickers     = 316; // <-- добавлено
   }
 
-  optional string symbol = 3;
-  optional string symbolId = 4;
-  optional int64 createTime = 5;
-  optional int64 sendTime = 6;
+  optional string symbol     = 3;
+  optional string symbolId   = 4;
+  optional int64  createTime = 5;
+  optional int64  sendTime   = 6; // => wrap.GetSendTime()
 }

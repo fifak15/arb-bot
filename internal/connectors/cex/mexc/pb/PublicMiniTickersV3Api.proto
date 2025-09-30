@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package pb;
+option go_package = "github.com/you/arb-bot/internal/connectors/cex/mexc/pb;pb";
+
+message PublicMiniTickersV3Api {
+  repeated PublicMiniTickersV3Api_Item items = 1;
+}
+
+message PublicMiniTickersV3Api_Item {
+  string symbol = 1;  // => it.GetSymbol()
+  string price  = 2;  // => it.GetPrice()
+  string volume = 3;  // => it.GetVolume()
+  string high   = 4;  // (опц.) it.GetHigh()
+  string low    = 5;  // (опц.) it.GetLow()
+  string rate   = 6;  // (опц.) it.GetRate() — 24h change rate
+}

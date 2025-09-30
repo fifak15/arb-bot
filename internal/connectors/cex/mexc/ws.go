@@ -25,7 +25,7 @@ type Ticker struct {
 }
 
 type WS struct {
-	URL    string // пример: wss://wbs-api.mexc.com/ws  (обнови дефолт в местах вызова на wss://wbs-api.mexc.com/ws)
+	URL    string
 	Dialer *websocket.Dialer
 	conn   *websocket.Conn
 	mu     sync.Mutex
@@ -47,7 +47,6 @@ func (w *WS) connect(ctx context.Context) error {
 	if w.conn != nil {
 		return nil
 	}
-	// Некоторые ноды MEXC ждут Origin
 	h := http.Header{"Origin": []string{"https://www.mexc.com"}}
 	c, _, err := w.Dialer.DialContext(ctx, w.URL, h)
 	if err != nil {
@@ -78,7 +77,6 @@ func (w *WS) SubscribeBookTicker(ctx context.Context, symbols []string) (<-chan 
 		return nil, err
 	}
 
-	// spot@public.aggre.bookTicker.v3.api.pb@100ms@<SYMBOL>
 	params := make([]string, 0, len(symbols))
 	for _, s := range symbols {
 		params = append(params, "spot@public.aggre.bookTicker.v3.api.pb@100ms@"+strings.ToUpper(s))
@@ -99,7 +97,6 @@ func (w *WS) SubscribeBookTicker(ctx context.Context, symbols []string) (<-chan 
 		defer close(out)
 		defer w.Close()
 
-		// app-level PING раз в 20s (сервер отвечает PONG JSON'ом)
 		pingStop := make(chan struct{})
 		go func() {
 			t := time.NewTicker(20 * time.Second)
@@ -117,7 +114,6 @@ func (w *WS) SubscribeBookTicker(ctx context.Context, symbols []string) (<-chan 
 		}()
 		defer close(pingStop)
 
-		// простая структура для отлова JSON ACK/PONG
 		type ack struct {
 			ID      *int   `json:"id,omitempty"`
 			Code    *int   `json:"code,omitempty"`
@@ -139,25 +135,19 @@ func (w *WS) SubscribeBookTicker(ctx context.Context, symbols []string) (<-chan 
 				return
 			}
 
-			// Обновляем read deadline на каждое сообщение
 			_ = w.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 
-			// 1) JSON-тексты: ACK и PONG
 			if msgType == websocket.TextMessage {
 				var a ack
 				if json.Unmarshal(data, &a) == nil {
-					// игнорируем SUBSCRIPTION-ACK и PONG
 					if a.ID != nil || strings.EqualFold(a.Msg, "PONG") {
 						continue
 					}
-					// Иногда могут прилетать служебные JSON-кадры с channel — тоже пропускаем
 					continue
 				}
-				// Не распарсили JSON — пропустим
 				continue
 			}
 
-			// 2) Рыночные данные приходят бинарным Protobuf
 			if msgType != websocket.BinaryMessage {
 				continue
 			}
@@ -172,13 +162,11 @@ func (w *WS) SubscribeBookTicker(ctx context.Context, symbols []string) (<-chan 
 				continue
 			}
 
-			// Берём тело именно аггрегированного bookTicker'а
 			bt := wrap.GetPublicAggreBookTicker()
 			if bt == nil {
 				continue
 			}
 
-			// parse bid/ask (они строки)
 			var bid, ask float64
 			if v, err := strconv.ParseFloat(bt.GetBidPrice(), 64); err == nil {
 				bid = v
@@ -196,7 +184,7 @@ func (w *WS) SubscribeBookTicker(ctx context.Context, symbols []string) (<-chan 
 			}
 
 			out <- Ticker{
-				Symbol: wrap.GetSymbol(), // MEXC присылает символ в обёртке
+				Symbol: wrap.GetSymbol(),
 				Bid:    bid,
 				Ask:    ask,
 				TS:     ts,

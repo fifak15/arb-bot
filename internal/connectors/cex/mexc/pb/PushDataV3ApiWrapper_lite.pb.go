@@ -21,17 +21,19 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Обёртка, которую присылает MEXC WS в бинарном protobuf
 type PushDataV3ApiWrapper struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Channel string                 `protobuf:"bytes,1,opt,name=channel,proto3" json:"channel,omitempty"`
 	// Types that are valid to be assigned to Body:
 	//
 	//	*PushDataV3ApiWrapper_PublicAggreBookTicker
+	//	*PushDataV3ApiWrapper_PublicMiniTickers
 	Body          isPushDataV3ApiWrapper_Body `protobuf_oneof:"body"`
 	Symbol        *string                     `protobuf:"bytes,3,opt,name=symbol,proto3,oneof" json:"symbol,omitempty"`
 	SymbolId      *string                     `protobuf:"bytes,4,opt,name=symbolId,proto3,oneof" json:"symbolId,omitempty"`
 	CreateTime    *int64                      `protobuf:"varint,5,opt,name=createTime,proto3,oneof" json:"createTime,omitempty"`
-	SendTime      *int64                      `protobuf:"varint,6,opt,name=sendTime,proto3,oneof" json:"sendTime,omitempty"`
+	SendTime      *int64                      `protobuf:"varint,6,opt,name=sendTime,proto3,oneof" json:"sendTime,omitempty"` // => wrap.GetSendTime()
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -89,6 +91,15 @@ func (x *PushDataV3ApiWrapper) GetPublicAggreBookTicker() *PublicAggreBookTicker
 	return nil
 }
 
+func (x *PushDataV3ApiWrapper) GetPublicMiniTickers() *PublicMiniTickersV3Api {
+	if x != nil {
+		if x, ok := x.Body.(*PushDataV3ApiWrapper_PublicMiniTickers); ok {
+			return x.PublicMiniTickers
+		}
+	}
+	return nil
+}
+
 func (x *PushDataV3ApiWrapper) GetSymbol() string {
 	if x != nil && x.Symbol != nil {
 		return *x.Symbol
@@ -125,16 +136,23 @@ type PushDataV3ApiWrapper_PublicAggreBookTicker struct {
 	PublicAggreBookTicker *PublicAggreBookTickerV3Api `protobuf:"bytes,315,opt,name=publicAggreBookTicker,proto3,oneof"`
 }
 
+type PushDataV3ApiWrapper_PublicMiniTickers struct {
+	PublicMiniTickers *PublicMiniTickersV3Api `protobuf:"bytes,316,opt,name=publicMiniTickers,proto3,oneof"` // <-- добавлено
+}
+
 func (*PushDataV3ApiWrapper_PublicAggreBookTicker) isPushDataV3ApiWrapper_Body() {}
+
+func (*PushDataV3ApiWrapper_PublicMiniTickers) isPushDataV3ApiWrapper_Body() {}
 
 var File_PushDataV3ApiWrapper_lite_proto protoreflect.FileDescriptor
 
 const file_PushDataV3ApiWrapper_lite_proto_rawDesc = "" +
 	"\n" +
-	"\x1fPushDataV3ApiWrapper_lite.proto\x12\x02pb\x1a PublicAggreBookTickerV3Api.proto\"\xc6\x02\n" +
+	"\x1fPushDataV3ApiWrapper_lite.proto\x12\x02pb\x1a PublicAggreBookTickerV3Api.proto\x1a\x1cPublicMiniTickersV3Api.proto\"\x93\x03\n" +
 	"\x14PushDataV3ApiWrapper\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\tR\achannel\x12T\n" +
-	"\x15publicAggreBookTicker\x18\xbb\x02 \x01(\v2\x1b.PublicAggreBookTickerV3ApiH\x00R\x15publicAggreBookTicker\x12\x1b\n" +
+	"\x15publicAggreBookTicker\x18\xbb\x02 \x01(\v2\x1b.PublicAggreBookTickerV3ApiH\x00R\x15publicAggreBookTicker\x12K\n" +
+	"\x11publicMiniTickers\x18\xbc\x02 \x01(\v2\x1a.pb.PublicMiniTickersV3ApiH\x00R\x11publicMiniTickers\x12\x1b\n" +
 	"\x06symbol\x18\x03 \x01(\tH\x01R\x06symbol\x88\x01\x01\x12\x1f\n" +
 	"\bsymbolId\x18\x04 \x01(\tH\x02R\bsymbolId\x88\x01\x01\x12#\n" +
 	"\n" +
@@ -163,14 +181,16 @@ var file_PushDataV3ApiWrapper_lite_proto_msgTypes = make([]protoimpl.MessageInfo
 var file_PushDataV3ApiWrapper_lite_proto_goTypes = []any{
 	(*PushDataV3ApiWrapper)(nil),       // 0: pb.PushDataV3ApiWrapper
 	(*PublicAggreBookTickerV3Api)(nil), // 1: PublicAggreBookTickerV3Api
+	(*PublicMiniTickersV3Api)(nil),     // 2: pb.PublicMiniTickersV3Api
 }
 var file_PushDataV3ApiWrapper_lite_proto_depIdxs = []int32{
 	1, // 0: pb.PushDataV3ApiWrapper.publicAggreBookTicker:type_name -> PublicAggreBookTickerV3Api
-	1, // [1:1] is the sub-list for method output_type
-	1, // [1:1] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	2, // 1: pb.PushDataV3ApiWrapper.publicMiniTickers:type_name -> pb.PublicMiniTickersV3Api
+	2, // [2:2] is the sub-list for method output_type
+	2, // [2:2] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_PushDataV3ApiWrapper_lite_proto_init() }
@@ -179,8 +199,10 @@ func file_PushDataV3ApiWrapper_lite_proto_init() {
 		return
 	}
 	file_PublicAggreBookTickerV3Api_proto_init()
+	file_PublicMiniTickersV3Api_proto_init()
 	file_PushDataV3ApiWrapper_lite_proto_msgTypes[0].OneofWrappers = []any{
 		(*PushDataV3ApiWrapper_PublicAggreBookTicker)(nil),
+		(*PushDataV3ApiWrapper_PublicMiniTickers)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

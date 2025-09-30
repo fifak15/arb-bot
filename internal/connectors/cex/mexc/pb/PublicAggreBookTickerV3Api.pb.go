@@ -100,8 +100,8 @@ const file_PublicAggreBookTickerV3Api_proto_rawDesc = "" +
 	"\bbidPrice\x18\x01 \x01(\tR\bbidPrice\x12 \n" +
 	"\vbidQuantity\x18\x02 \x01(\tR\vbidQuantity\x12\x1a\n" +
 	"\baskPrice\x18\x03 \x01(\tR\baskPrice\x12 \n" +
-	"\vaskQuantity\x18\x04 \x01(\tR\vaskQuantityBC\n" +
-	"\x1ccom.mxc.push.common.protobufB\x1fPublicAggreBookTickerV3ApiProtoH\x01P\x01b\x06proto3"
+	"\vaskQuantity\x18\x04 \x01(\tR\vaskQuantityB~\n" +
+	"\x1ccom.mxc.push.common.protobufB\x1fPublicAggreBookTickerV3ApiProtoH\x01P\x01Z9github.com/you/arb-bot/internal/connectors/cex/mexc/pb;pbb\x06proto3"
 
 var (
 	file_PublicAggreBookTickerV3Api_proto_rawDescOnce sync.Once
