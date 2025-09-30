@@ -97,13 +97,11 @@ func tryDecompress(b []byte) []byte {
 	return b
 }
 
-// SubscribeMiniTickers слушает общий канал miniTickers и отдаёт поток MiniTicker.
 func (w *MiniWS) SubscribeMiniTickers(ctx context.Context) (<-chan MiniTicker, <-chan error, error) {
 	if err := w.connect(ctx); err != nil {
 		return nil, nil, err
 	}
 
-	// один общий канал miniTickers (protobuf)
 	sub := struct {
 		ID     int      `json:"id"`
 		Method string   `json:"method"`
