@@ -57,5 +57,5 @@ discovery:
   from_rank: 100
   to_rank: 600
   pick: 15
-  coingecko_key: ""
+  coingecko_key: "CG-6xYAcpo3zeBewP95hk2UksPK"
   coingecko_verbose: false

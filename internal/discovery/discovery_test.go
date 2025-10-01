@@ -89,7 +89,7 @@ func TestDiscoveryService_Run_Success(t *testing.T) {
 	log := zap.NewNop()
 	service := NewService(cfg, log)
 
-	err = service.Run(context.Background())
+	_, err = service.Discover(context.Background())
 	assert.NoError(t, err)
 
 	// Verify results in Redis
@@ -112,6 +112,6 @@ func TestDiscoveryService_Run_APIFailure(t *testing.T) {
 	log := zap.NewNop()
 	service := NewService(cfg, log)
 
-	err := service.Run(context.Background())
+	_, err := service.Discover(context.Background())
 	assert.Error(t, err, "expected an error when the API fails")
 }

@@ -5,17 +5,15 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/you/arb-bot/internal/config"
 	"github.com/you/arb-bot/internal/connectors/cex/mexc"
 	"github.com/you/arb-bot/internal/detector"
 	"github.com/you/arb-bot/internal/dex/univ3"
+	"github.com/you/arb-bot/internal/discovery"
 	"github.com/you/arb-bot/internal/execution"
 	"github.com/you/arb-bot/internal/marketdata"
 	"github.com/you/arb-bot/internal/risk"
@@ -24,47 +22,30 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-import (
-	"github.com/you/arb-bot/internal/discovery"
-)
-
 // Bot manages the application's lifecycle and components.
 type Bot struct {
 	cfg       *config.Config
 	log       *zap.Logger
-	rdb       *redis.Client
 	discovery *discovery.Service
 }
 
 // New creates a new Bot instance.
 func New(cfg *config.Config, log *zap.Logger) *Bot {
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     cfg.Redis.Addr,
-		DB:       cfg.Redis.DB,
-		Username: cfg.Redis.Username,
-		Password: cfg.Redis.Password,
-	})
 	return &Bot{
-		cfg:       cfg,
-		log:       log,
-		rdb:       rdb,
+		cfg: cfg,
+		log: log,
+		// discovery без Redis
 		discovery: discovery.NewService(cfg, log),
 	}
 }
 
 // Run starts the bot's main loop.
-func (b *Bot) Run(ctx context.Context, runDiscovery bool) {
-	if runDiscovery {
-		if err := b.discovery.Run(ctx); err != nil {
-			b.log.Fatal("pair discovery failed", zap.Error(err))
-		}
-		b.log.Info("pair discovery finished, bot will now start monitoring")
-		return
-	}
-
+// runDiscovery больше не используется — всё делается в одном процессе.
+func (b *Bot) Run(ctx context.Context, _ bool) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// graceful shutdown
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -73,13 +54,16 @@ func (b *Bot) Run(ctx context.Context, runDiscovery bool) {
 		cancel()
 	}()
 
-	pairs, err := b.waitPairsFromRedis(ctx, b.cfg.ArbBot.MinPairs, b.cfg.ArbBot.BootstrapLookback, b.cfg.ArbBot.BootstrapPoll)
-	if err != nil || len(pairs) == 0 {
-		b.log.Fatal("failed to get pairs from Redis", zap.Error(err))
+	pairs, err := b.discovery.Discover(ctx)
+	if err != nil {
+		b.log.Fatal("pair discovery failed", zap.Error(err))
 	}
-	b.log.Info("got pairs from redis", zap.Int("count", len(pairs)))
+	if len(pairs) == 0 {
+		b.log.Fatal("no pairs discovered")
+	}
+	b.log.Info("discovered pairs", zap.Int("count", len(pairs)))
 
-	// 1) Start WebSocket feed for CEX prices and maintain a local cache.
+	// 2) Запускаем WS фид CEX и локальный кэш.
 	symbols := make([]string, 0, len(pairs))
 	for _, pm := range pairs {
 		symbols = append(symbols, pm.Symbol)
@@ -109,6 +93,7 @@ func (b *Bot) Run(ctx context.Context, runDiscovery bool) {
 	}()
 	b.log.Info("subscribed to WS book ticker", zap.Strings("symbols", symbols))
 
+	// 3) Инициализируем UniswapV3 multiquoter и пайплайны.
 	quoter, err := univ3.NewMultiQuoter(b.cfg, b.log)
 	if err != nil {
 		b.log.Fatal("failed to initialize uniswap multiquoter", zap.Error(err))
@@ -126,7 +111,7 @@ func (b *Bot) Run(ctx context.Context, runDiscovery bool) {
 
 func (b *Bot) runPairPipeline(
 	ctx context.Context,
-	pm pairMeta,
+	pm discovery.PairMeta,
 	cex *wsCEX,
 	quoter univ3.Quoter,
 ) {
@@ -178,72 +163,6 @@ func (b *Bot) runPairPipeline(
 	}
 
 	b.log.Info("pipeline started", zap.String("pair", cfg.Pair), zap.String("addr", pm.Addr))
-}
-
-type pairMeta struct {
-	Symbol string
-	Base   string
-	Addr   string
-	CgID   string
-}
-
-func (b *Bot) waitPairsFromRedis(ctx context.Context, minPairs int, lookback, poll time.Duration) ([]pairMeta, error) {
-	deadline := time.Now().Add(lookback)
-	seen := map[string]pairMeta{}
-
-	for {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		now := time.Now().UnixMilli()
-		since := now - int64(lookback/time.Millisecond)
-
-		syms, err := b.rdb.ZRangeByScore(ctx, "pair:active", &redis.ZRangeBy{
-			Min: strconv.FormatInt(since, 10), Max: "+inf",
-		}).Result()
-		if err != nil {
-			b.log.Warn("redis ZRangeByScore(pair:active) failed", zap.Error(err))
-			time.Sleep(poll)
-			continue
-		}
-
-		for _, s := range syms {
-			if _, ok := seen[s]; ok {
-				continue
-			}
-			m, err := b.rdb.HGetAll(ctx, "pair:meta:"+s).Result()
-			if err != nil || len(m) == 0 {
-				continue
-			}
-			pm := pairMeta{
-				Symbol: strings.ToUpper(m["symbol"]),
-				Base:   strings.ToUpper(m["base"]),
-				Addr:   m["addr"],
-				CgID:   m["cg_id"],
-			}
-			if pm.Symbol != "" && pm.Addr != "" {
-				seen[pm.Symbol] = pm
-			}
-			if len(seen) >= minPairs {
-				break
-			}
-		}
-
-		if len(seen) >= minPairs {
-			break
-		}
-		if time.Now().After(deadline) && len(seen) > 0 {
-			b.log.Warn("bootstrap timeout - starting with fewer pairs", zap.Int("pairs", len(seen)))
-			break
-		}
-		time.Sleep(poll)
-	}
-
-	out := make([]pairMeta, 0, len(seen))
-	for _, pm := range seen {
-		out = append(out, pm)
-	}
-	return out, nil
 }
 
 // BookCache holds the latest bid/ask from the WebSocket feed.

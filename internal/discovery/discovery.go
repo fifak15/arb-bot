@@ -14,40 +14,41 @@ import (
 	"time"
 
 	"github.com/you/arb-bot/internal/config"
-	"github.com/you/arb-bot/internal/connectors/redisfeed"
 	"github.com/you/arb-bot/internal/screener"
-	"github.com/you/arb-bot/internal/types"
 	"go.uber.org/zap"
 )
+
+// PairMeta — минимальное описание пары для пайплайна.
+type PairMeta struct {
+	Symbol string
+	Base   string
+	Addr   string
+	CgID   string
+}
 
 // Service handles the discovery of new trading pairs.
 type Service struct {
 	cfg *config.Config
 	log *zap.Logger
-	pub *redisfeed.Publisher
 }
 
 // NewService creates a new discovery service.
 func NewService(cfg *config.Config, log *zap.Logger) *Service {
-	return &Service{
-		cfg: cfg,
-		log: log,
-		pub: redisfeed.NewPublisher(cfg),
-	}
+	return &Service{cfg: cfg, log: log}
 }
 
-// Run fetches, filters, and stores trading pairs in Redis.
-func (s *Service) Run(ctx context.Context) error {
+// Discover fetches, filters, enriches and returns pairs in-memory (no Redis).
+func (s *Service) Discover(ctx context.Context) ([]PairMeta, error) {
 	s.log.Info("starting pair discovery")
 
 	// 1) Fetch 24-hour ticker data from MEXC.
 	s.log.Info("fetching 24-hour ticker data from MEXC")
 	tickers, err := s.fetchTicker24h(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to fetch tickers: %w", err)
+		return nil, fmt.Errorf("failed to fetch tickers: %w", err)
 	}
 	if len(tickers) == 0 {
-		return fmt.Errorf("empty response on tickers")
+		return nil, fmt.Errorf("empty response on tickers")
 	}
 
 	// 2) Filter for /USDT pairs, sort by quote volume, and select a ranked window.
@@ -90,7 +91,7 @@ func (s *Service) Run(ctx context.Context) error {
 	window := rows[start:end]
 	s.log.Info("rank window", zap.Int("from", fromRank), zap.Int("to", toRank), zap.Int("total_pairs", len(window)))
 	if len(window) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// 3) Build the arbitrum-one index from CoinGecko.
@@ -102,7 +103,7 @@ func (s *Service) Run(ctx context.Context) error {
 	s.log.Info("building arbitrum-one index")
 	idx, err := screener.FetchArbitrumIndex(ctx, cgKey)
 	if err != nil {
-		return fmt.Errorf("failed to fetch coingecko index: %w", err)
+		return nil, fmt.Errorf("failed to fetch coingecko index: %w", err)
 	}
 
 	// 4) Enrich pairs with contract addresses and filter for those on Arbitrum.
@@ -123,34 +124,31 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	s.log.Info("filtered for arbitrum-one", zap.Int("with_arb_addr", len(withArb)), zap.Int("total_enriched", len(enriched)))
 	if len(withArb) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	// 5) Pick a random sample and publish to Redis.
+	// 5) Pick a random sample and return it.
 	pick := s.cfg.Discovery.Pick
 	if pick > len(withArb) {
 		pick = len(withArb)
 	}
 	sample := cryptShuffle(withArb)[:pick]
 
+	out := make([]PairMeta, 0, len(sample))
 	nowMs := time.Now().UnixMilli()
-	s.log.Info("publishing pairs to redis", zap.Int("count", len(sample)))
+	_ = nowMs // оставлено на случай будущего логирования timestamp
 	for _, p := range sample {
-		pm := types.PairMeta{
+		out = append(out, PairMeta{
 			Symbol: p.Symbol,
 			Base:   p.Base,
 			Addr:   strings.TrimSpace(p.ContractETH),
 			CgID:   strings.TrimSpace(p.CoinGeckoID),
-		}
-		if err := s.pub.UpsertPairMeta(ctx, pm, nowMs); err != nil {
-			s.log.Warn("failed to upsert pair meta", zap.String("symbol", p.Symbol), zap.Error(err))
-			continue
-		}
-		s.log.Info("published pair", zap.String("symbol", pm.Symbol), zap.String("base", pm.Base), zap.String("addr", pm.Addr), zap.String("cg_id", pm.CgID))
+		})
+		s.log.Info("selected pair", zap.String("symbol", p.Symbol), zap.String("base", p.Base), zap.String("addr", strings.TrimSpace(p.ContractETH)), zap.String("cg_id", strings.TrimSpace(p.CoinGeckoID)))
 	}
 
-	s.log.Info("pair discovery finished")
-	return nil
+	s.log.Info("pair discovery finished", zap.Int("count", len(out)))
+	return out, nil
 }
 
 type t24 struct {

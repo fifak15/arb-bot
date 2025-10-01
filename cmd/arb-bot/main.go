@@ -30,12 +30,10 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to load config", zap.Error(err))
 	}
-	// The bot now manages its own configuration for sub-components.
 	cfg.ArbBot.MinPairs = *minPairs
 	cfg.ArbBot.BootstrapLookback = *bootstrapLookback
 	cfg.ArbBot.BootstrapPoll = *bootstrapPoll
 
-	// The bot is created and run, abstracting away the implementation details.
 	runDiscovery := flag.Bool("run-discovery", false, "run pair discovery and exit")
 	flag.Parse()
 
