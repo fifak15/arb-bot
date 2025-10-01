@@ -63,7 +63,6 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	}
 	b.log.Info("discovered pairs", zap.Int("count", len(pairs)))
 
-	// 2) Запускаем WS фид CEX и локальный кэш.
 	symbols := make([]string, 0, len(pairs))
 	for _, pm := range pairs {
 		symbols = append(symbols, pm.Symbol)
