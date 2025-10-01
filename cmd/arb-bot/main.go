@@ -21,47 +21,16 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-func newRussianLogger() (*zap.Logger, error) {
-	ruLevel := func(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
-		switch l {
-		case zapcore.DebugLevel:
-			enc.AppendString("debug")
-		case zapcore.InfoLevel:
-			enc.AppendString("info")
-		case zapcore.WarnLevel:
-			enc.AppendString("warning")
-		case zapcore.ErrorLevel:
-			enc.AppendString("error")
-		case zapcore.DPanicLevel, zapcore.PanicLevel, zapcore.FatalLevel:
-			enc.AppendString("fatality")
-		default:
-			enc.AppendString(l.String())
-		}
-	}
-	ruTime := func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
-		enc.AppendString(t.Format(time.RFC3339))
-	}
-
-	cfg := zap.Config{
-		Level:       zap.NewAtomicLevelAt(zap.DebugLevel),
-		Development: false,
-		Encoding:    "json",
-		EncoderConfig: zapcore.EncoderConfig{
-			TimeKey:        "время",
-			LevelKey:       "уровень",
-			NameKey:        "лог",
-			CallerKey:      "файл",
-			MessageKey:     "сообщение",
-			StacktraceKey:  "стек",
-			LineEnding:     zapcore.DefaultLineEnding,
-			EncodeLevel:    ruLevel,
-			EncodeTime:     ruTime,
-			EncodeDuration: zapcore.MillisDurationEncoder,
-			EncodeCaller:   zapcore.ShortCallerEncoder,
-		},
-		OutputPaths:      []string{"stdout"},
-		ErrorOutputPaths: []string{"stderr"},
-	}
+func newLogger() (*zap.Logger, error) {
+	cfg := zap.NewProductionConfig()
+	cfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+	cfg.Encoding = "json"
+	cfg.EncoderConfig.TimeKey = "ts"
+	cfg.EncoderConfig.LevelKey = "level"
+	cfg.EncoderConfig.MessageKey = "msg"
+	cfg.EncoderConfig.CallerKey = "caller"
+	cfg.EncoderConfig.StacktraceKey = "stacktrace"
+	cfg.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout(time.RFC3339)
 	return cfg.Build()
 }
 
@@ -69,7 +38,7 @@ func main() {
 	cfgPath := flag.String("config", "./config.yaml", "путь к конфигу")
 	flag.Parse()
 
-	logger, err := newRussianLogger()
+	logger, err := newLogger()
 	if err != nil {
 		panic(err)
 	}
@@ -90,6 +59,7 @@ func main() {
 		logger.Warn("получен сигнал, выходим…")
 		cancel()
 	}()
+
 	metrics.Serve(ctx, cfg.Metrics.ListenAddr, nil, logger)
 	logger.Info("распознаны fee-тиры DEX", zap.Uint32s("тиры", cfg.DEX.FeeTiers))
 
