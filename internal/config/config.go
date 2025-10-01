@@ -18,11 +18,28 @@ type RedisCfg struct {
 	SnapNS    string `yaml:"snap_ns"`
 }
 
+type ArbBotCfg struct {
+	MinPairs          int           `yaml:"-"`
+	BootstrapLookback time.Duration `yaml:"-"`
+	BootstrapPoll     time.Duration `yaml:"-"`
+}
+
+type DiscoveryCfg struct {
+	FromRank         int    `yaml:"from_rank"`
+	ToRank           int    `yaml:"to_rank"`
+	Pick             int    `yaml:"pick"`
+	CoinGeckoKey     string `yaml:"coingecko_key"`
+	CoinGeckoVerbose bool   `yaml:"coingecko_verbose"`
+}
+
 type Config struct {
 	Pair     string `yaml:"pair"`
 	Scenario string `yaml:"scenario"`
 	Mode     string `yaml:"mode"`
 	DryRun   bool   `yaml:"dry_run"`
+
+	ArbBot    ArbBotCfg    `yaml:"-"`
+	Discovery DiscoveryCfg `yaml:"discovery"`
 
 	MEXC struct {
 		ApiKey            string  `yaml:"api_key"`

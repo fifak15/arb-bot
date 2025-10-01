@@ -55,8 +55,14 @@ func newCGHTTPError(resp *http.Response, body []byte) *cgHTTPError {
 	}
 }
 
+var CoinGeckoURLOverride = ""
+
 func makeReq(ctx context.Context, base, pathAndQuery, apiKey string, isPro bool) (*http.Request, error) {
-	u := strings.TrimRight(base, "/") + pathAndQuery
+	effectiveBase := base
+	if CoinGeckoURLOverride != "" {
+		effectiveBase = CoinGeckoURLOverride
+	}
+	u := strings.TrimRight(effectiveBase, "/") + pathAndQuery
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, err
