@@ -11,6 +11,17 @@ mexc:
   withdrawal_fee_base: 0.0012
   taker_fee_bps: 5
 
+redis:
+  addr: "127.0.0.1:6379"
+  db: 0
+  username: ""
+  password: ""
+  stream: "book:stream"
+  pubchan: "book:pub"   # если захочешь Pub/Sub
+  active_key: "book:active"
+  snap_ns: "book:snap:" # префикс для HASH-ов
+
+
 chain:
   network: "arbitrum-one"
   rpc_http: "https://arb1.arbitrum.io/rpc"         # HTTP RPC Arbitrum One

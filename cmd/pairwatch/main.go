@@ -16,8 +16,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/you/arb-bot/internal/connectors/cex/mexc"
+	"github.com/you/arb-bot/internal/config"
+	"github.com/you/arb-bot/internal/connectors/redisfeed"
 	"github.com/you/arb-bot/internal/screener"
+	"github.com/you/arb-bot/internal/types"
 )
 
 type t24 struct {
@@ -28,21 +30,14 @@ type t24 struct {
 }
 
 func main() {
-	// ---- flags ----
-	var wsURL string
-	var fromRank int
-	var toRank int
-	var pick int
+	var fromRank, toRank, pick int
 	var cgKey string
-	var logEverySec int
 	var cgVerbose bool
 
-	flag.StringVar(&wsURL, "mexc-ws", "wss://wbs-api.mexc.com/ws", "MEXC WS url")
 	flag.IntVar(&fromRank, "from", 100, "начальный ранг (включительно)")
 	flag.IntVar(&toRank, "to", 600, "конечный ранг (включительно)")
 	flag.IntVar(&pick, "pick", 15, "сколько случайных пар выбрать")
 	flag.StringVar(&cgKey, "cg-key", "CG-6xYAcpo3zeBewP95hk2UksPK", "CoinGecko Pro/Demo API key")
-	flag.IntVar(&logEverySec, "log-every", 20, "троттлинг логов для каждого символа, сек")
 	flag.BoolVar(&cgVerbose, "cg-verbose", false, "подробные логи CoinGecko")
 	flag.Parse()
 
@@ -58,6 +53,14 @@ func main() {
 		cancel()
 	}()
 
+	// загрузим конфиг и инициализируем publisher
+	cfg, err := config.Load("./config.yaml")
+	if err != nil {
+		panic(err)
+	}
+	pub := redisfeed.NewPublisher(cfg)
+
+	// 1) MEXC 24h
 	fmt.Println("[mexc] GET /api/v3/ticker/24hr …")
 	tickers, err := fetchTicker24h(ctx)
 	if err != nil {
@@ -68,11 +71,10 @@ func main() {
 		return
 	}
 
+	// 2) /USDT + QV sort + окно [from..to]
 	type row struct {
-		Sym string
-		QV  float64
-		LP  float64
-		Vol float64
+		Sym         string
+		QV, LP, Vol float64
 	}
 	rows := make([]row, 0, len(tickers))
 	for _, r := range tickers {
@@ -83,21 +85,15 @@ func main() {
 		lp := toF(r.LastPrice)
 		vol := toF(r.Volume)
 		qv := toF(r.QuoteVolume)
-		if !isFinite(qv) && isFinite(lp) && isFinite(vol) && lp > 0 && vol > 0 {
+		if !isFinite(qv) && lp > 0 && vol > 0 {
 			qv = lp * vol
 		}
-		if !isFinite(qv) || qv <= 0 {
+		if qv <= 0 {
 			continue
 		}
 		rows = append(rows, row{Sym: sym, QV: qv, LP: lp, Vol: vol})
 	}
-	if len(rows) == 0 {
-		fmt.Println("[mexc] нет USDT-пар с валидным quoteVolume")
-		return
-	}
-
 	sort.Slice(rows, func(i, j int) bool { return rows[i].QV > rows[j].QV })
-
 	if fromRank < 1 {
 		fromRank = 1
 	}
@@ -115,18 +111,18 @@ func main() {
 		return
 	}
 
-	// ---- 2) индекс CoinGecko arbitrum-one ----
+	// 3) CoinGecko: индекс arbitrum-one
 	if cgKey == "" {
-		fmt.Println("[cg] предупреждение: ключ не задан — запрос может быть ограничен по rate-limit")
+		fmt.Println("[cg] предупреждение: ключ не задан — возможны 429")
 	}
 	fmt.Println("[cg] строим индекс arbitrum-one…")
-	idx, err := screener.FetchArbitrumIndex(ctx, cgKey) // /coins/list?include_platform=true
+	idx, err := screener.FetchArbitrumIndex(ctx, cgKey)
 	if err != nil {
 		fmt.Printf("[cg] ошибка индекса: %v\n", err)
 		return
 	}
 
-	// ---- 3) подготовить пары и 4) обогатить + фильтр arbitrum-one ----
+	// 4) enrich + фильтр только с адресом arbitrum-one
 	pairs := make([]screener.PairInfo, 0, len(window))
 	for i, r := range window {
 		base := strings.TrimSuffix(r.Sym, "USDT")
@@ -134,90 +130,41 @@ func main() {
 			Symbol: r.Sym, Base: base, Quote: "USDT", Rank: fromRank + i,
 		})
 	}
-	enriched := screener.EnrichPairsFromIndex(pairs, idx) // без сетевых вызовов
+	enriched := screener.EnrichPairsFromIndex(pairs, idx)
 	withArb := enriched[:0]
 	for _, p := range enriched {
-		if strings.TrimSpace(p.ContractETH) != "" {
+		addr := strings.TrimSpace(p.ContractETH) // arbitrum-one addr из индекса
+		if addr != "" {
 			withArb = append(withArb, p)
 		}
 	}
 	fmt.Printf("[cg] после фильтра arbitrum-one: %d из %d\n", len(withArb), len(enriched))
 	if len(withArb) == 0 {
-		fmt.Println("[cg] адресов arbitrum-one не найдено в выбранном окне")
 		return
 	}
 
 	if pick > len(withArb) {
 		pick = len(withArb)
 	}
-	sample := cryptShuffle(withArb)
-	sample = sample[:pick]
+	sample := cryptShuffle(withArb)[:pick]
 
-	fmt.Printf("[final] выбрано случайных %d пар с адресами Arbitrum One:\n", len(sample))
+	nowMs := time.Now().UnixMilli()
+	fmt.Printf("[final] публикуем %d пар в Redis как метаданные (symbol/base/addr/cg_id)…\n", len(sample))
 	for _, p := range sample {
-		fmt.Printf("[final] %3d) %-12s base=%-10s addr=%s (cg:%s)\n",
-			p.Rank, p.Symbol, p.Base, p.ContractETH, p.CoinGeckoID)
-	}
-
-	metaBySym := make(map[string]struct {
-		Base string
-		Addr string
-		CGID string
-	}, len(sample))
-	for _, p := range sample {
-		metaBySym[p.Symbol] = struct {
-			Base string
-			Addr string
-			CGID string
-		}{
-			Base: p.Base,
-			Addr: strings.TrimSpace(p.ContractETH),
-			CGID: strings.TrimSpace(p.CoinGeckoID),
+		pm := types.PairMeta{
+			Symbol: p.Symbol,
+			Base:   p.Base,
+			Addr:   strings.TrimSpace(p.ContractETH),
+			CgID:   strings.TrimSpace(p.CoinGeckoID),
 		}
-	}
-
-	syms := make([]string, 0, len(sample))
-	for _, p := range sample {
-		syms = append(syms, p.Symbol)
-	}
-	fmt.Printf("[book] подписка на %d символов: %v\n", len(syms), syms)
-
-	bt := mexc.NewWS(wsURL)
-	stream, err := bt.SubscribeBookTicker(ctx, syms)
-	if err != nil {
-		panic(err)
-	}
-	logEvery := time.Duration(logEverySec) * time.Second
-	last := make(map[string]time.Time)
-
-	fmt.Println("[book] поток запущен; троттлинг логов =", logEvery)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case t := <-stream:
-			now := time.Now()
-			if prev, ok := last[t.Symbol]; ok && now.Sub(prev) < logEvery {
-				continue
-			}
-			last[t.Symbol] = now
-
-			mid := (t.Bid + t.Ask) / 2
-			spread := 0.0
-			if mid > 0 {
-				spread = (t.Ask - t.Bid) / mid * 100
-			}
-			ts := t.TS.Format(time.RFC3339)
-
-			if m, ok := metaBySym[t.Symbol]; ok && m.Addr != "" {
-				fmt.Printf("[book] %s  %-12s base=%-10s addr=%s (cg:%s)  bid=%.8f ask=%.8f spread=%.4f%%\n",
-					ts, t.Symbol, m.Base, m.Addr, m.CGID, t.Bid, t.Ask, spread)
-			} else {
-				fmt.Printf("[book] %s  %-12s bid=%.8f ask=%.8f spread=%.4f%%\n",
-					ts, t.Symbol, t.Bid, t.Ask, spread)
-			}
+		if err := pub.UpsertPairMeta(ctx, pm, nowMs); err != nil {
+			fmt.Printf("[redis] ошибка UpsertPairMeta для %s: %v\n", p.Symbol, err)
+			continue
 		}
+		fmt.Printf("[pair] %-12s base=%-8s addr=%s (cg:%s)\n", pm.Symbol, pm.Base, pm.Addr, pm.CgID)
 	}
+
+	fmt.Println("[done] пары записаны в Redis; второй сервис может стартовать мониторинг.")
 }
 
 func fetchTicker24h(ctx context.Context) ([]t24, error) {
@@ -234,11 +181,7 @@ func fetchTicker24h(ctx context.Context) ([]t24, error) {
 	return arr, nil
 }
 
-func toF(s string) float64 {
-	f, _ := strconv.ParseFloat(s, 64)
-	return f
-}
-
+func toF(s string) float64    { f, _ := strconv.ParseFloat(s, 64); return f }
 func isFinite(f float64) bool { return !((f != f) || (f > 1e308) || (f < -1e308)) }
 
 func cryptShuffle[T any](in []T) []T {
@@ -250,7 +193,6 @@ func cryptShuffle[T any](in []T) []T {
 	}
 	return out
 }
-
 func crandInt(n int) int {
 	if n <= 1 {
 		return 0

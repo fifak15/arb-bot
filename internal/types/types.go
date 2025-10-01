@@ -9,6 +9,13 @@ const (
 	DEXBuyCEXSell Direction = "DEX_BUY_CEX_SELL"
 )
 
+type PairMeta struct {
+	Symbol string `json:"symbol"`
+	Base   string `json:"base"`
+	Addr   string `json:"addr"` // arbitrum-one
+	CgID   string `json:"cg_id"`
+}
+
 type Opportunity struct {
 	Direction      Direction
 	QtyBase        float64

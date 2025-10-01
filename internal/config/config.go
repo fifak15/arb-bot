@@ -7,6 +7,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type RedisCfg struct {
+	Addr      string `yaml:"addr"`
+	DB        int    `yaml:"db"`
+	Username  string `yaml:"username"`
+	Password  string `yaml:"password"`
+	Stream    string `yaml:"stream"`
+	PubChan   string `yaml:"pubchan"`
+	ActiveKey string `yaml:"active_key"`
+	SnapNS    string `yaml:"snap_ns"`
+}
+
 type Config struct {
 	Pair     string `yaml:"pair"`
 	Scenario string `yaml:"scenario"`
@@ -61,6 +72,8 @@ type Config struct {
 		QuoteIntervalMs int `yaml:"quote_interval_ms"`
 		DetectorTickMs  int `yaml:"detector_tick_ms"`
 	} `yaml:"timings"`
+
+	Redis RedisCfg `yaml:"redis"`
 }
 
 func Load(path string) (*Config, error) {
@@ -80,6 +93,15 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Risk.MinFillRatio == 0 {
 		c.Risk.MinFillRatio = 0.7
+	}
+	if c.Redis.Stream == "" {
+		c.Redis.Stream = "book:stream"
+	}
+	if c.Redis.ActiveKey == "" {
+		c.Redis.ActiveKey = "book:active"
+	}
+	if c.Redis.SnapNS == "" {
+		c.Redis.SnapNS = "book:snap:"
 	}
 	return &c, nil
 }
