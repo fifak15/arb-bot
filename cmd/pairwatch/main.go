@@ -58,7 +58,6 @@ func main() {
 		cancel()
 	}()
 
-	// ---- 1) REST /ticker/24hr ----
 	fmt.Println("[mexc] GET /api/v3/ticker/24hr …")
 	tickers, err := fetchTicker24h(ctx)
 	if err != nil {
@@ -69,7 +68,6 @@ func main() {
 		return
 	}
 
-	// оставить только ...USDT, посчитать quoteVolume (fallback), отсортировать
 	type row struct {
 		Sym string
 		QV  float64
@@ -97,9 +95,9 @@ func main() {
 		fmt.Println("[mexc] нет USDT-пар с валидным quoteVolume")
 		return
 	}
+
 	sort.Slice(rows, func(i, j int) bool { return rows[i].QV > rows[j].QV })
 
-	// срез [from..to]
 	if fromRank < 1 {
 		fromRank = 1
 	}
@@ -161,6 +159,23 @@ func main() {
 			p.Rank, p.Symbol, p.Base, p.ContractETH, p.CoinGeckoID)
 	}
 
+	metaBySym := make(map[string]struct {
+		Base string
+		Addr string
+		CGID string
+	}, len(sample))
+	for _, p := range sample {
+		metaBySym[p.Symbol] = struct {
+			Base string
+			Addr string
+			CGID string
+		}{
+			Base: p.Base,
+			Addr: strings.TrimSpace(p.ContractETH),
+			CGID: strings.TrimSpace(p.CoinGeckoID),
+		}
+	}
+
 	syms := make([]string, 0, len(sample))
 	for _, p := range sample {
 		syms = append(syms, p.Symbol)
@@ -186,13 +201,21 @@ func main() {
 				continue
 			}
 			last[t.Symbol] = now
+
 			mid := (t.Bid + t.Ask) / 2
 			spread := 0.0
 			if mid > 0 {
 				spread = (t.Ask - t.Bid) / mid * 100
 			}
-			fmt.Printf("[book] %s  %-12s bid=%.8f ask=%.8f spread=%.4f%%\n",
-				t.TS.Format(time.RFC3339), t.Symbol, t.Bid, t.Ask, spread)
+			ts := t.TS.Format(time.RFC3339)
+
+			if m, ok := metaBySym[t.Symbol]; ok && m.Addr != "" {
+				fmt.Printf("[book] %s  %-12s base=%-10s addr=%s (cg:%s)  bid=%.8f ask=%.8f spread=%.4f%%\n",
+					ts, t.Symbol, m.Base, m.Addr, m.CGID, t.Bid, t.Ask, spread)
+			} else {
+				fmt.Printf("[book] %s  %-12s bid=%.8f ask=%.8f spread=%.4f%%\n",
+					ts, t.Symbol, t.Bid, t.Ask, spread)
+			}
 		}
 	}
 }
