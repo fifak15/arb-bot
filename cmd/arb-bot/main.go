@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math/big"
 	"os"
 	"os/signal"
 	"strconv"
@@ -12,17 +13,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/redis/go-redis/v9"
 	"github.com/you/arb-bot/internal/config"
+	"github.com/you/arb-bot/internal/connectors/cex/mexc"
 	"github.com/you/arb-bot/internal/detector"
 	"github.com/you/arb-bot/internal/dex/univ3"
 	"github.com/you/arb-bot/internal/execution"
 	"github.com/you/arb-bot/internal/marketdata"
 	"github.com/you/arb-bot/internal/risk"
 	"github.com/you/arb-bot/internal/types"
-
-	// WS-клиент MEXC уже есть у тебя в репозитории
-	"github.com/you/arb-bot/internal/connectors/cex/mexc"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -153,7 +153,7 @@ func runPairPipeline(
 	rootCfg *config.Config,
 	pm pairMeta,
 	cex *wsCEX,
-	quoter univ3.Quoter,
+	quoteCh <-chan marketdata.DexQuotes,
 	log *zap.Logger,
 ) {
 	// локальная копия конфига под конкретную пару
@@ -164,8 +164,9 @@ func runPairPipeline(
 	oppCh := make(chan types.Opportunity, 64)
 
 	// marketdata → detector
-	go marketdata.Run(ctx, &cfg, cex, quoter, mdCh, log) // берёт BestBidAsk из wsCEX (WS-cache) :contentReference[oaicite:3]{index=3}
-	go detector.Run(ctx, &cfg, mdCh, oppCh, log)         // считает net/roi и решает направление :contentReference[oaicite:4]{index=4}
+	// NOTE: The signature of marketdata.Run will be changed in the next step.
+	go marketdata.Run(ctx, &cfg, cex, quoteCh, mdCh, log)
+	go detector.Run(ctx, &cfg, mdCh, oppCh, log)
 
 	if cfg.DryRun {
 		log.Warn("DRY-RUN: реальные ордера/свапы отправляться не будут", zap.String("pair", cfg.Pair))
@@ -198,14 +199,121 @@ func runPairPipeline(
 			log.Fatal("инициализация роутера Uniswap", zap.String("pair", cfg.Pair), zap.Error(err))
 		}
 		riskEng := risk.NewEngine(&cfg)
-		exec, err := execution.NewExecutor(&cfg, nil /*не нужен PlaceIOC тут*/, router, riskEng, log)
+		exec, err := execution.NewExecutor(&cfg, nil, router, riskEng, log)
 		if err != nil {
 			log.Fatal("инициализация исполнителя", zap.String("pair", cfg.Pair), zap.Error(err))
 		}
-		go exec.Run(ctx, oppCh) // исполняет лучший сценарий CEX/DEX (логика у тебя уже есть) :contentReference[oaicite:5]{index=5}
+		go exec.Run(ctx, oppCh)
 	}
 
 	log.Info("pipeline стартовал", zap.String("pair", cfg.Pair), zap.String("addr", pm.Addr))
+}
+
+func runCentralQuoter(
+	ctx context.Context,
+	cfg *config.Config,
+	mq *univ3.MultiQuoter,
+	pairs []pairMeta,
+	cex *wsCEX,
+	quoteChans map[string]chan marketdata.DexQuotes,
+	log *zap.Logger,
+) {
+	log.Info("центральный квотер запущен", zap.Duration("interval", cfg.QuoteInterval()))
+	t := time.NewTicker(cfg.QuoteInterval())
+	defer t.Stop()
+
+	wethAddr := common.HexToAddress(cfg.DEX.WETH)
+	usdtAddr := common.HexToAddress(cfg.DEX.USDT)
+
+	amountInWei := new(big.Int)
+	new(big.Float).Mul(big.NewFloat(cfg.Trade.BaseQty), big.NewFloat(1e18)).Int(amountInWei)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			// Estimate gas using the current CEX price of the first pair as a proxy for ETH/USD
+			var midPrice float64
+			if len(pairs) > 0 {
+				bid, ask, err := cex.BestBidAsk(pairs[0].Symbol)
+				if err == nil && bid > 0 && ask > 0 {
+					midPrice = (bid + ask) / 2
+				}
+			}
+			if midPrice == 0 {
+				log.Warn("could not get CEX price for gas estimation, using fallback")
+				midPrice = 3000 // Fallback price
+			}
+
+			gasUSD, err := mq.EstimateGasUSD(ctx, midPrice)
+			if err != nil {
+				log.Error("failed to estimate gas", zap.Error(err))
+				continue
+			}
+
+			reqs := make([]univ3.MultiQuoteRequest, 0, len(pairs)*2)
+			for _, p := range pairs {
+				// CEX_BUY_DEX_SELL: sell base on DEX for USDT
+				reqs = append(reqs, univ3.MultiQuoteRequest{
+					PairSymbol: p.Symbol,
+					TokenIn:    wethAddr,
+					TokenOut:   usdtAddr,
+					Amount:     new(big.Int).Set(amountInWei),
+					FeeTiers:   cfg.DEX.FeeTiers,
+					Type:       univ3.QuoteTypeExactInput,
+				})
+				// DEX_BUY_CEX_SELL: buy base on DEX with USDT
+				reqs = append(reqs, univ3.MultiQuoteRequest{
+					PairSymbol: p.Symbol,
+					TokenIn:    usdtAddr,
+					TokenOut:   wethAddr,
+					Amount:     new(big.Int).Set(amountInWei),
+					FeeTiers:   cfg.DEX.FeeTiers,
+					Type:       univ3.QuoteTypeExactOutput,
+				})
+			}
+
+			results, err := mq.QuoteAll(ctx, reqs)
+			if err != nil {
+				log.Error("MultiQuoter.QuoteAll failed", zap.Error(err))
+				continue
+			}
+
+			groupedResults := make(map[string]map[univ3.QuoteType]univ3.MultiQuoteResult)
+			for _, req := range reqs {
+				if _, ok := groupedResults[req.PairSymbol]; !ok {
+					groupedResults[req.PairSymbol] = make(map[univ3.QuoteType]univ3.MultiQuoteResult)
+				}
+				if res, ok := results[req.PairSymbol]; ok {
+					groupedResults[req.PairSymbol][req.Type] = res
+				}
+			}
+
+			for symbol, resMap := range groupedResults {
+				ch, ok := quoteChans[symbol]
+				if !ok {
+					continue
+				}
+				quotes := marketdata.DexQuotes{
+					PairSymbol:      symbol,
+					DexOutAmountUSD: resMap[univ3.QuoteTypeExactInput].AmountUSD,
+					DexOutFeeTier:   resMap[univ3.QuoteTypeExactInput].FeeTier,
+					DexOutError:     resMap[univ3.QuoteTypeExactInput].Error,
+					DexInAmountUSD:  resMap[univ3.QuoteTypeExactOutput].AmountUSD,
+					DexInFeeTier:    resMap[univ3.QuoteTypeExactOutput].FeeTier,
+					DexInError:      resMap[univ3.QuoteTypeExactOutput].Error,
+					GasUSD:          gasUSD,
+					Ts:              time.Now(),
+				}
+				select {
+				case ch <- quotes:
+				default:
+					log.Warn("канал котировок для пары переполнен; пропускаем", zap.String("pair", symbol))
+				}
+			}
+		}
+	}
 }
 
 /*************** main ***************/
@@ -245,7 +353,6 @@ func main() {
 	}
 	log.Info("получены пары из Redis", zap.Int("count", len(pairs)))
 
-	// 1) поднимаем WS на MEXC ровно по этим парам и ведём локальный кэш bid/ask
 	symbols := make([]string, 0, len(pairs))
 	for _, pm := range pairs {
 		symbols = append(symbols, pm.Symbol)
@@ -255,7 +362,7 @@ func main() {
 		wsURL = "wss://wbs-api.mexc.com/ws"
 	}
 	book := NewBookCache()
-	bt := mexc.NewWS(wsURL) // твой WS-клиент
+	bt := mexc.NewWS(wsURL)
 	wsStream, err := bt.SubscribeBookTicker(ctx, symbols)
 	if err != nil {
 		log.Fatal("SubscribeBookTicker", zap.Error(err))
@@ -272,16 +379,22 @@ func main() {
 	}()
 	log.Info("WS bookTicker подписан", zap.Strings("symbols", symbols))
 
-	quoter, err := univ3.NewSlot0Quoter(cfg, log)
+	multiQuoter, err := univ3.NewMultiQuoter(cfg, log)
 	if err != nil {
-		log.Fatal("инициализация квотера Uniswap", zap.Error(err))
+		log.Fatal("не удалось инициализировать MultiQuoter", zap.Error(err))
 	}
 
 	cex := &wsCEX{book: book}
+	quoteChans := make(map[string]chan marketdata.DexQuotes, len(pairs))
 	for _, pm := range pairs {
 		pm := pm
-		go runPairPipeline(ctx, cfg, pm, cex, quoter, log)
+		quoteCh := make(chan marketdata.DexQuotes, 64)
+		quoteChans[pm.Symbol] = quoteCh
+		// The signature of runPairPipeline is updated to accept the quote channel.
+		go runPairPipeline(ctx, cfg, pm, cex, quoteCh, log)
 	}
+
+	go runCentralQuoter(ctx, cfg, multiQuoter, pairs, cex, quoteChans, log)
 
 	<-ctx.Done()
 	log.Info("arb-bot завершён")

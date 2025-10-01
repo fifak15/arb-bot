@@ -7,6 +7,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type DEXConfig struct {
+	Router    string   `yaml:"router"`
+	QuoterV1  string   `yaml:"quoter_v1"`
+	QuoterV2  string   `yaml:"quoter_v2"`
+	Multicall string   `yaml:"multicall"`
+	WETH      string   `yaml:"weth"`
+	USDT      string   `yaml:"usdt"`
+	FeeTier   uint32   `yaml:"fee_tier"`
+	FeeTiers  []uint32 `yaml:"fee_tiers"`
+}
+
 type RedisCfg struct {
 	Addr      string `yaml:"addr"`
 	DB        int    `yaml:"db"`
@@ -42,15 +53,7 @@ type Config struct {
 		GasLimitSwap       uint64  `yaml:"gas_limit_swap"`
 	} `yaml:"chain"`
 
-	DEX struct {
-		Router   string   `yaml:"router"`
-		QuoterV1 string   `yaml:"quoter_v1"`
-		QuoterV2 string   `yaml:"quoter_v2"`
-		WETH     string   `yaml:"weth"`
-		USDT     string   `yaml:"usdt"`
-		FeeTier  uint32   `yaml:"fee_tier"`
-		FeeTiers []uint32 `yaml:"fee_tiers"`
-	} `yaml:"dex"`
+	DEX DEXConfig `yaml:"dex"`
 
 	Risk struct {
 		MaxSlippageBps int     `yaml:"max_slippage_bps"`

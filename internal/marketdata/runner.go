@@ -2,6 +2,7 @@ package marketdata
 
 import (
 	"context"
+	"math"
 	"time"
 
 	"github.com/you/arb-bot/internal/config"
@@ -9,47 +10,26 @@ import (
 	"go.uber.org/zap"
 )
 
-type Snapshot struct {
-	BestAskCEX, BestBidCEX float64
-	DexOutUSD, GasSellUSD  float64 // CEX_BUY_DEX_SELL
-	DexInUSD, GasBuyUSD    float64 // DEX_BUY_CEX_SELL
-	DexSellFeeTier         uint32
-	DexBuyFeeTier          uint32
-	Ts                     time.Time
-}
-
-type cexIface interface {
-	BestBidAsk(symbol string) (bid, ask float64, err error)
-}
-type quoterIface interface {
-	QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, feeTier uint32, err error)
-	QuoteDexInUSD(ctx context.Context, qtyBase float64, ethUSD float64) (inUSD float64, gasUSD float64, feeTier uint32, err error)
-}
-
+// The Run function is now updated to work with the new channel-based quote system.
 func Run(
 	ctx context.Context,
 	cfg *config.Config,
-	cex cexIface,
-	quoter quoterIface,
+	cex CexIface,
+	quoteCh <-chan DexQuotes, // The new channel for receiving DEX quotes
 	out chan<- Snapshot,
 	log *zap.Logger,
 ) {
-	log.Info("marketdata runner started",
-		zap.String("pair", cfg.Pair),
-		zap.Duration("quote_interval", cfg.QuoteInterval()),
-		zap.Float64("base_qty", cfg.Trade.BaseQty),
-	)
+	log.Info("marketdata runner started", zap.String("pair", cfg.Pair))
 
-	t := time.NewTicker(cfg.QuoteInterval())
-	defer t.Stop()
-
+	// The loop is now driven by incoming DEX quotes, not a ticker.
 	for {
 		select {
 		case <-ctx.Done():
-			log.Info("marketdata runner stopped (context done)")
+			log.Info("marketdata runner stopped (context done)", zap.String("pair", cfg.Pair))
 			return
 
-		case <-t.C:
+		case quotes := <-quoteCh:
+			// Once we receive new DEX quotes, we fetch the latest CEX price.
 			bid, ask, err := cex.BestBidAsk(cfg.Pair)
 			if err != nil {
 				log.Warn("cex BestBidAsk failed", zap.String("pair", cfg.Pair), zap.Error(err))
@@ -63,59 +43,57 @@ func Run(
 			mid := 0.5 * (bid + ask)
 			imetrics.CEXMid.Set(mid)
 
-			// Quote for CEX_BUY_DEX_SELL
-			startedSell := time.Now()
-			dexOut, gasSell, sellFee, errSell := quoter.QuoteDexOutUSD(ctx, cfg.Trade.BaseQty, mid)
-			if errSell != nil {
+			// Process quotes for CEX_BUY_DEX_SELL
+			if quotes.DexOutError != nil {
 				imetrics.QuoterErrors.Inc()
-				log.Warn("quoter failed (dex sell)", zap.Error(errSell))
-				// continue? or publish partial? for now, skip.
+				log.Warn("quoter failed (dex sell)", zap.String("pair", cfg.Pair), zap.Error(quotes.DexOutError))
 				continue
 			}
-			log.Info("dex quote ok (sell)",
-				zap.Float64("out_usd", dexOut),
-				zap.Float64("gas_usd", gasSell),
-				zap.Uint32("fee_tier", sellFee),
-				zap.Duration("took", time.Since(startedSell)),
+			log.Debug("dex quote ok (sell)",
+				zap.String("pair", cfg.Pair),
+				zap.Float64("out_usd", quotes.DexOutAmountUSD),
+				zap.Uint32("fee_tier", quotes.DexOutFeeTier),
 			)
 
-			// Quote for DEX_BUY_CEX_SELL
-			startedBuy := time.Now()
-			dexIn, gasBuy, buyFee, errBuy := quoter.QuoteDexInUSD(ctx, cfg.Trade.BaseQty, mid)
-			if errBuy != nil {
+			// Process quotes for DEX_BUY_CEX_SELL
+			if quotes.DexInError != nil {
 				imetrics.QuoterErrors.Inc()
-				log.Warn("quoter failed (dex buy)", zap.Error(errBuy))
+				log.Warn("quoter failed (dex buy)", zap.String("pair", cfg.Pair), zap.Error(quotes.DexInError))
 				continue
 			}
-			log.Info("dex quote ok (buy)",
-				zap.Float64("in_usd", dexIn),
-				zap.Float64("gas_usd", gasBuy),
-				zap.Uint32("fee_tier", buyFee),
-				zap.Duration("took", time.Since(startedBuy)),
+			log.Debug("dex quote ok (buy)",
+				zap.String("pair", cfg.Pair),
+				zap.Float64("in_usd", quotes.DexInAmountUSD),
+				zap.Uint32("fee_tier", quotes.DexInFeeTier),
 			)
 
-			imetrics.DexOutUSD.Set(dexOut)
-			imetrics.GasUSD.Set(gasSell)
+			gasUSD := quotes.GasUSD
+			imetrics.DexOutUSD.Set(quotes.DexOutAmountUSD)
+			imetrics.GasUSD.Set(gasUSD)
+
+			if math.IsNaN(quotes.DexOutAmountUSD) || math.IsInf(quotes.DexOutAmountUSD, 0) || math.IsNaN(quotes.DexInAmountUSD) || math.IsInf(quotes.DexInAmountUSD, 0) {
+				log.Warn("received non-finite dex quote", zap.String("pair", cfg.Pair))
+				continue
+			}
 
 			snap := Snapshot{
 				BestAskCEX:     ask,
 				BestBidCEX:     bid,
-				DexOutUSD:      dexOut,
-				GasSellUSD:     gasSell,
-				DexSellFeeTier: sellFee,
-				DexInUSD:       dexIn,
-				GasBuyUSD:      gasBuy,
-				DexBuyFeeTier:  buyFee,
+				DexOutUSD:      quotes.DexOutAmountUSD,
+				GasSellUSD:     gasUSD,
+				DexSellFeeTier: quotes.DexOutFeeTier,
+				DexInUSD:       quotes.DexInAmountUSD,
+				GasBuyUSD:      gasUSD,
+				DexBuyFeeTier:  quotes.DexInFeeTier,
 				Ts:             time.Now(),
 			}
 			select {
 			case out <- snap:
-			// OK
 			case <-ctx.Done():
-				log.Info("marketdata runner stopped while publishing")
+				log.Info("marketdata runner stopped while publishing", zap.String("pair", cfg.Pair))
 				return
 			default:
-				log.Warn("snapshot channel is full; dropping snapshot")
+				log.Warn("snapshot channel is full; dropping snapshot", zap.String("pair", cfg.Pair))
 			}
 		}
 	}
