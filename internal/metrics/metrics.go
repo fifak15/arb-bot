@@ -10,8 +10,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// Serve запускает HTTP-сервер метрик и health-check.
-// Если reg == nil — используется глобальный Gatherer.
 func Serve(ctx context.Context, addr string, reg *prometheus.Registry, log *zap.Logger) {
 	if addr == "" {
 		log.Info("metrics disabled: empty addr")

@@ -25,15 +25,15 @@ func newRussianLogger() (*zap.Logger, error) {
 	ruLevel := func(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 		switch l {
 		case zapcore.DebugLevel:
-			enc.AppendString("отладка")
+			enc.AppendString("debug")
 		case zapcore.InfoLevel:
-			enc.AppendString("инфо")
+			enc.AppendString("info")
 		case zapcore.WarnLevel:
-			enc.AppendString("предупреждение")
+			enc.AppendString("warning")
 		case zapcore.ErrorLevel:
-			enc.AppendString("ошибка")
+			enc.AppendString("error")
 		case zapcore.DPanicLevel, zapcore.PanicLevel, zapcore.FatalLevel:
-			enc.AppendString("фатальная")
+			enc.AppendString("fatality")
 		default:
 			enc.AppendString(l.String())
 		}
