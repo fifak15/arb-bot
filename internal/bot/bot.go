@@ -109,7 +109,13 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	}
 
 	cex := &wsCEX{book: book}
-	for _, pm := range pairs {
+
+	monPairs := pairs
+	if len(monPairs) > 3 {
+		monPairs = monPairs[:3]
+		b.log.Warn("limiting DEX monitoring pairs", zap.Int("limit", 3))
+	}
+	for _, pm := range monPairs {
 		pm := pm
 		go b.runPairPipeline(ctx, pm, cex, quoter)
 	}

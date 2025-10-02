@@ -22,18 +22,17 @@ redis:
 
 chain:
   network: "arbitrum-one"
-  rpc_http: "https://arb1.arbitrum.io/rpc"         # HTTP RPC Arbitrum One
-  rpc_ws:   "wss://arb1.arbitrum.io/ws"            # WS RPC (если используешь)
-  wallet_pk: ""                                    # твой приватный ключ (hex, без 0x)
-  max_priority_fee_gwei: 0.1                       # на Arbitrum обычно маленький tip
+  rpc_http: "https://arb1.arbitrum.io/rpc"
+  rpc_ws:   "wss://arb1.arbitrum.io/ws"
+  wallet_pk: ""
+  max_priority_fee_gwei: 0.1                      
   gas_limit_swap: 180000
 
 dex:
-  # Внимание: адреса для ARBITRUM ONE
-  usdt: "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"   # USDT (Arbitrum)
-  fee_tiers: [ 100, 500, 3000, 10000 ]                               # какие тиров проверять
-  quoter_v1: ""                                        # V1 можно не использовать на Arbitrum
-  quoter_v2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"  # Uniswap V3 QuoterV2 (Arbitrum)
+  usdt: "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"
+  fee_tiers: [ 3000, 10000 ]
+  quoter_v1: ""
+  quoter_v2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
 
 risk:
   max_slippage_bps: 50
@@ -49,7 +48,7 @@ metrics:
   listen_addr: ":9090"
 
 timings:
-  quote_interval_ms: 600
+  quote_interval_ms: 900
   detector_tick_ms: 150
 
 discovery:

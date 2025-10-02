@@ -2,6 +2,7 @@ package marketdata
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -70,7 +71,11 @@ func Run(
 			dexOut, gasSell, sellFee, errSell := quoter.QuoteDexOutUSD(ctx, baseTokenAddr, quoteTokenAddr, cfg.Trade.BaseQty, mid)
 			if errSell != nil {
 				imetrics.QuoterErrors.Inc()
-				log.Warn("quoter failed (dex sell)", zap.Error(errSell))
+				if strings.Contains(errSell.Error(), "no working quoter found") {
+					log.Debug("quoter failed (dex sell)", zap.Error(errSell))
+				} else {
+					log.Warn("quoter failed (dex sell)", zap.Error(errSell))
+				}
 				continue
 			}
 			log.Info("dex quote ok (sell)",
