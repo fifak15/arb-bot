@@ -4,7 +4,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/you/arb-bot/internal/config"
+	"github.com/you/arb-bot/internal/dex/univ3"
+	"github.com/you/arb-bot/internal/discovery"
 	imetrics "github.com/you/arb-bot/internal/metrics"
 	"go.uber.org/zap"
 )
@@ -21,16 +24,13 @@ type Snapshot struct {
 type cexIface interface {
 	BestBidAsk(symbol string) (bid, ask float64, err error)
 }
-type quoterIface interface {
-	QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, feeTier uint32, err error)
-	QuoteDexInUSD(ctx context.Context, qtyBase float64, ethUSD float64) (inUSD float64, gasUSD float64, feeTier uint32, err error)
-}
 
 func Run(
 	ctx context.Context,
 	cfg *config.Config,
+	pm discovery.PairMeta,
 	cex cexIface,
-	quoter quoterIface,
+	quoter univ3.Quoter,
 	out chan<- Snapshot,
 	log *zap.Logger,
 ) {
@@ -39,6 +39,9 @@ func Run(
 		zap.Duration("quote_interval", cfg.QuoteInterval()),
 		zap.Float64("base_qty", cfg.Trade.BaseQty),
 	)
+
+	baseTokenAddr := common.HexToAddress(pm.Addr)
+	quoteTokenAddr := common.HexToAddress(cfg.DEX.USDT)
 
 	t := time.NewTicker(cfg.QuoteInterval())
 	defer t.Stop()
@@ -65,7 +68,7 @@ func Run(
 
 			// Quote for CEX_BUY_DEX_SELL
 			startedSell := time.Now()
-			dexOut, gasSell, sellFee, errSell := quoter.QuoteDexOutUSD(ctx, cfg.Trade.BaseQty, mid)
+			dexOut, gasSell, sellFee, errSell := quoter.QuoteDexOutUSD(ctx, baseTokenAddr, quoteTokenAddr, cfg.Trade.BaseQty, mid)
 			if errSell != nil {
 				imetrics.QuoterErrors.Inc()
 				log.Warn("quoter failed (dex sell)", zap.Error(errSell))
@@ -81,7 +84,7 @@ func Run(
 
 			// Quote for DEX_BUY_CEX_SELL
 			startedBuy := time.Now()
-			dexIn, gasBuy, buyFee, errBuy := quoter.QuoteDexInUSD(ctx, cfg.Trade.BaseQty, mid)
+			dexIn, gasBuy, buyFee, errBuy := quoter.QuoteDexInUSD(ctx, quoteTokenAddr, baseTokenAddr, cfg.Trade.BaseQty, mid)
 			if errBuy != nil {
 				imetrics.QuoterErrors.Inc()
 				log.Warn("quoter failed (dex buy)", zap.Error(errBuy))

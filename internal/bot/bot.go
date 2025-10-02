@@ -115,7 +115,7 @@ func (b *Bot) runPairPipeline(
 	mdCh := make(chan marketdata.Snapshot, 64)
 	oppCh := make(chan types.Opportunity, 64)
 
-	go marketdata.Run(ctx, &cfg, cex, quoter, mdCh, b.log)
+	go marketdata.Run(ctx, &cfg, pm, cex, quoter, mdCh, b.log)
 	go detector.Run(ctx, &cfg, mdCh, oppCh, b.log)
 
 	if cfg.DryRun {

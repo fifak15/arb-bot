@@ -7,8 +7,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/you/arb-bot/internal/config"
 	"github.com/you/arb-bot/internal/screener"
@@ -72,13 +70,7 @@ func TestDiscoveryService_Run_Success(t *testing.T) {
 	cgServer := mockCoinGeckoAPI(t)
 	defer cgServer.Close()
 
-	// Setup mock Redis
-	mr, err := miniredis.Run()
-	assert.NoError(t, err)
-	defer mr.Close()
-
 	cfg := newTestDiscoveryConfig(mexcServer.URL, cgServer.URL)
-	cfg.Redis.Addr = mr.Addr()
 
 	// Override screener URL to use the mock
 	originalScreenerURL := screener.CoinGeckoURLOverride
@@ -89,14 +81,10 @@ func TestDiscoveryService_Run_Success(t *testing.T) {
 	log := zap.NewNop()
 	service := NewService(cfg, log)
 
-	_, err = service.Discover(context.Background())
+	pairs, err := service.Discover(context.Background())
 	assert.NoError(t, err)
-
-	// Verify results in Redis
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	keys, err := rdb.Keys(context.Background(), "pair:meta:*").Result()
-	assert.NoError(t, err)
-	assert.NotEmpty(t, keys, "expected pairs to be published to Redis")
+	assert.NotEmpty(t, pairs, "expected pairs to be discovered")
+	assert.Len(t, pairs, 2, "expected 2 pairs to be discovered")
 }
 
 func TestDiscoveryService_Run_APIFailure(t *testing.T) {

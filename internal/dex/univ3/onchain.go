@@ -17,10 +17,8 @@ import (
 )
 
 type Quoter interface {
-	// outUSD — ожидаемая выручка в USDT/USDC (1:1 к USD), gasUSD — оценка газа в USD.
-	QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, feeTier uint32, err error)
-	// inUSD — требуемые затраты в USDT/USDC (1:1 к USD), gasUSD — оценка газа в USD.
-	QuoteDexInUSD(ctx context.Context, qtyBase float64, ethUSD float64) (inUSD float64, gasUSD float64, feeTier uint32, err error)
+	QuoteDexOutUSD(ctx context.Context, tokenIn, tokenOut common.Address, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, feeTier uint32, err error)
+	QuoteDexInUSD(ctx context.Context, tokenIn, tokenOut common.Address, qtyBase float64, ethUSD float64) (inUSD float64, gasUSD float64, feeTier uint32, err error)
 }
 
 type Router interface {
@@ -131,16 +129,14 @@ func NewSlot0Quoter(cfg *config.Config, log *zap.Logger) (Quoter, error) {
 	}, nil
 }
 
-func (q *slot0Quoter) quoteExactInputSingleV1(ctx context.Context, fee uint32, amountInWei *big.Int) (*big.Int, error) {
+func (q *slot0Quoter) quoteExactInputSingleV1(ctx context.Context, tokenIn, tokenOut common.Address, fee uint32, amountInWei *big.Int) (*big.Int, error) {
 	quoter := common.HexToAddress(q.cfg.DEX.QuoterV1)
 	if quoter == (common.Address{}) {
 		return nil, fmt.Errorf("quoterV1 address not set")
 	}
-	weth := common.HexToAddress(q.cfg.DEX.WETH)
-	usdx := common.HexToAddress(q.cfg.DEX.USDT)
 
 	input, err := q.q1abi.Pack("quoteExactInputSingle",
-		weth, usdx, big.NewInt(int64(fee)), amountInWei, big.NewInt(0),
+		tokenIn, tokenOut, big.NewInt(int64(fee)), amountInWei, big.NewInt(0),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("pack quoterV1: %w", err)
@@ -162,13 +158,11 @@ func (q *slot0Quoter) quoteExactInputSingleV1(ctx context.Context, fee uint32, a
 	return outs[0].(*big.Int), nil
 }
 
-func (q *slot0Quoter) quoteExactInputSingleV2(ctx context.Context, fee uint32, amountInWei *big.Int) (*big.Int, error) {
+func (q *slot0Quoter) quoteExactInputSingleV2(ctx context.Context, tokenIn, tokenOut common.Address, fee uint32, amountInWei *big.Int) (*big.Int, error) {
 	quoter := common.HexToAddress(q.cfg.DEX.QuoterV2)
 	if quoter == (common.Address{}) {
 		return nil, fmt.Errorf("quoterV2 address not set")
 	}
-	weth := common.HexToAddress(q.cfg.DEX.WETH)
-	usdx := common.HexToAddress(q.cfg.DEX.USDT)
 
 	params := struct {
 		TokenIn           common.Address
@@ -177,8 +171,8 @@ func (q *slot0Quoter) quoteExactInputSingleV2(ctx context.Context, fee uint32, a
 		Fee               *big.Int
 		SqrtPriceLimitX96 *big.Int
 	}{
-		TokenIn:           weth,
-		TokenOut:          usdx,
+		TokenIn:           tokenIn,
+		TokenOut:          tokenOut,
 		AmountIn:          amountInWei,
 		Fee:               big.NewInt(int64(fee)),
 		SqrtPriceLimitX96: big.NewInt(0),
@@ -205,17 +199,14 @@ func (q *slot0Quoter) quoteExactInputSingleV2(ctx context.Context, fee uint32, a
 	return outs[0].(*big.Int), nil
 }
 
-func (q *slot0Quoter) quoteExactOutputSingleV1(ctx context.Context, fee uint32, amountOutWei *big.Int) (*big.Int, error) {
+func (q *slot0Quoter) quoteExactOutputSingleV1(ctx context.Context, tokenIn, tokenOut common.Address, fee uint32, amountOutWei *big.Int) (*big.Int, error) {
 	quoter := common.HexToAddress(q.cfg.DEX.QuoterV1)
 	if quoter == (common.Address{}) {
 		return nil, fmt.Errorf("quoterV1 address not set")
 	}
-	weth := common.HexToAddress(q.cfg.DEX.WETH)
-	usdx := common.HexToAddress(q.cfg.DEX.USDT)
 
-	// Note: tokenIn is now USDX, tokenOut is WETH
 	input, err := q.q1abi.Pack("quoteExactOutputSingle",
-		usdx, weth, big.NewInt(int64(fee)), amountOutWei, big.NewInt(0),
+		tokenIn, tokenOut, big.NewInt(int64(fee)), amountOutWei, big.NewInt(0),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("pack quoteExactOutputSingleV1: %w", err)
@@ -235,13 +226,11 @@ func (q *slot0Quoter) quoteExactOutputSingleV1(ctx context.Context, fee uint32, 
 	return outs[0].(*big.Int), nil
 }
 
-func (q *slot0Quoter) quoteExactOutputSingleV2(ctx context.Context, fee uint32, amountOutWei *big.Int) (*big.Int, error) {
+func (q *slot0Quoter) quoteExactOutputSingleV2(ctx context.Context, tokenIn, tokenOut common.Address, fee uint32, amountOutWei *big.Int) (*big.Int, error) {
 	quoter := common.HexToAddress(q.cfg.DEX.QuoterV2)
 	if quoter == (common.Address{}) {
 		return nil, fmt.Errorf("quoterV2 address not set")
 	}
-	weth := common.HexToAddress(q.cfg.DEX.WETH)
-	usdx := common.HexToAddress(q.cfg.DEX.USDT)
 
 	params := struct {
 		TokenIn           common.Address
@@ -250,8 +239,8 @@ func (q *slot0Quoter) quoteExactOutputSingleV2(ctx context.Context, fee uint32, 
 		Fee               *big.Int
 		SqrtPriceLimitX96 *big.Int
 	}{
-		TokenIn:           usdx,
-		TokenOut:          weth,
+		TokenIn:           tokenIn,
+		TokenOut:          tokenOut,
 		Amount:            amountOutWei,
 		Fee:               big.NewInt(int64(fee)),
 		SqrtPriceLimitX96: big.NewInt(0),
@@ -302,7 +291,7 @@ func (q *slot0Quoter) estimateGasUSD(ctx context.Context, ethUSD float64) float6
 
 // --- Публичная котировка ---
 
-func (q *slot0Quoter) QuoteDexInUSD(ctx context.Context, qtyBase float64, ethUSD float64) (inUSD float64, gasUSD float64, feeTier uint32, err error) {
+func (q *slot0Quoter) QuoteDexInUSD(ctx context.Context, tokenIn, tokenOut common.Address, qtyBase float64, ethUSD float64) (inUSD float64, gasUSD float64, feeTier uint32, err error) {
 	if qtyBase <= 0 {
 		return 0, 0, 0, fmt.Errorf("qtyBase must be > 0")
 	}
@@ -311,14 +300,16 @@ func (q *slot0Quoter) QuoteDexInUSD(ctx context.Context, qtyBase float64, ethUSD
 		tiers = []uint32{500, 3000}
 	}
 
-	// The amount of WETH we want to receive
+	decOut, err := q.erc20Decimals(ctx, tokenOut)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to get decimals for tokenOut %s: %w", tokenOut, err)
+	}
 	amountOutWei := new(big.Int)
-	new(big.Float).Mul(big.NewFloat(qtyBase), big.NewFloat(1e18)).Int(amountOutWei)
+	new(big.Float).Mul(big.NewFloat(qtyBase), big.NewFloat(math.Pow10(decOut))).Int(amountOutWei)
 
-	usdx := common.HexToAddress(q.cfg.DEX.USDT)
-	decUSDX, derr := q.erc20Decimals(ctx, usdx)
-	if derr != nil {
-		return 0, 0, 0, derr
+	decIn, err := q.erc20Decimals(ctx, tokenIn)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to get decimals for tokenIn %s: %w", tokenIn, err)
 	}
 
 	var bestIn *big.Int
@@ -328,7 +319,7 @@ func (q *slot0Quoter) QuoteDexInUSD(ctx context.Context, qtyBase float64, ethUSD
 	// 1) Try QuoterV2 first
 	if q.cfg.DEX.QuoterV2 != "" {
 		for _, fee := range tiers {
-			amt, e := q.quoteExactOutputSingleV2(ctx, fee, amountOutWei)
+			amt, e := q.quoteExactOutputSingleV2(ctx, tokenIn, tokenOut, fee, amountOutWei)
 			if e != nil {
 				q.log.Debug("QuoterV2 ExactOutput failed", zap.Uint32("fee", fee), zap.Error(e))
 				continue
@@ -345,7 +336,7 @@ func (q *slot0Quoter) QuoteDexInUSD(ctx context.Context, qtyBase float64, ethUSD
 	// 2) Fallback to QuoterV1
 	if bestIn == nil && q.cfg.DEX.QuoterV1 != "" {
 		for _, fee := range tiers {
-			amt, e := q.quoteExactOutputSingleV1(ctx, fee, amountOutWei)
+			amt, e := q.quoteExactOutputSingleV1(ctx, tokenIn, tokenOut, fee, amountOutWei)
 			if e != nil {
 				q.log.Debug("QuoterV1 ExactOutput failed", zap.Uint32("fee", fee), zap.Error(e))
 				continue
@@ -359,7 +350,7 @@ func (q *slot0Quoter) QuoteDexInUSD(ctx context.Context, qtyBase float64, ethUSD
 	}
 
 	if bestIn != nil {
-		human := new(big.Float).Quo(new(big.Float).SetInt(bestIn), big.NewFloat(math.Pow10(decUSDX)))
+		human := new(big.Float).Quo(new(big.Float).SetInt(bestIn), big.NewFloat(math.Pow10(decIn)))
 		inUSD, _ = human.Float64()
 		q.log.Info("DEX quote selected (exact output)",
 			zap.String("quoter", quoterVersion),
@@ -374,7 +365,7 @@ func (q *slot0Quoter) QuoteDexInUSD(ctx context.Context, qtyBase float64, ethUSD
 	return 0, 0, 0, fmt.Errorf("no working quoter found for any fee tier (exact output)")
 }
 
-func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, feeTier uint32, err error) {
+func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, tokenIn, tokenOut common.Address, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, feeTier uint32, err error) {
 	if qtyBase <= 0 {
 		return 0, 0, 0, fmt.Errorf("qtyBase must be > 0")
 	}
@@ -387,13 +378,16 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 		}
 	}
 
+	decIn, err := q.erc20Decimals(ctx, tokenIn)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to get decimals for tokenIn %s: %w", tokenIn, err)
+	}
 	amountInWei := new(big.Int)
-	new(big.Float).Mul(big.NewFloat(qtyBase), big.NewFloat(1e18)).Int(amountInWei)
+	new(big.Float).Mul(big.NewFloat(qtyBase), big.NewFloat(math.Pow10(decIn))).Int(amountInWei)
 
-	usdx := common.HexToAddress(q.cfg.DEX.USDT)
-	decUSDX, derr := q.erc20Decimals(ctx, usdx)
-	if derr != nil {
-		return 0, 0, 0, derr
+	decOut, err := q.erc20Decimals(ctx, tokenOut)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to get decimals for tokenOut %s: %w", tokenOut, err)
 	}
 
 	var bestOut *big.Int
@@ -402,7 +396,7 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 
 	if q.cfg.DEX.QuoterV2 != "" {
 		for _, fee := range tiers {
-			amt, e := q.quoteExactInputSingleV2(ctx, fee, amountInWei)
+			amt, e := q.quoteExactInputSingleV2(ctx, tokenIn, tokenOut, fee, amountInWei)
 			if e != nil {
 				q.log.Debug("QuoterV2 failed", zap.Uint32("fee", fee), zap.Error(e))
 				continue
@@ -417,7 +411,7 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 
 	if bestOut == nil && q.cfg.DEX.QuoterV1 != "" {
 		for _, fee := range tiers {
-			amt, e := q.quoteExactInputSingleV1(ctx, fee, amountInWei)
+			amt, e := q.quoteExactInputSingleV1(ctx, tokenIn, tokenOut, fee, amountInWei)
 			if e != nil {
 				q.log.Debug("QuoterV1 failed", zap.Uint32("fee", fee), zap.Error(e))
 				continue
@@ -431,7 +425,7 @@ func (q *slot0Quoter) QuoteDexOutUSD(ctx context.Context, qtyBase float64, ethUS
 	}
 
 	if bestOut != nil {
-		human := new(big.Float).Quo(new(big.Float).SetInt(bestOut), big.NewFloat(math.Pow10(decUSDX)))
+		human := new(big.Float).Quo(new(big.Float).SetInt(bestOut), big.NewFloat(math.Pow10(decOut)))
 		outUSD, _ = human.Float64()
 		q.log.Info("DEX quote selected",
 			zap.String("quoter", quoterVersion),
