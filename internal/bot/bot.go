@@ -6,13 +6,15 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common" // ⬅️ добавили
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/you/arb-bot/internal/config"
 	"github.com/you/arb-bot/internal/connectors/cex/mexc"
+	"github.com/you/arb-bot/internal/dash" // ★ добавили
 	"github.com/you/arb-bot/internal/detector"
 	"github.com/you/arb-bot/internal/dex/univ3"
 	"github.com/you/arb-bot/internal/discovery"
@@ -46,11 +48,11 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	// graceful shutdown
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sigs
-		b.log.Warn("received signal, shutting down...")
-		cancel()
-	}()
+	go func() { <-sigs; b.log.Warn("received signal, shutting down..."); cancel() }()
+
+	// --- старт дашборда ---
+	store := dash.NewStore()
+	go dash.StartHTTP(ctx, store, ":8080") // http://localhost:8080
 
 	// 1) discovery
 	pairs, err := b.discovery.Discover(ctx)
@@ -97,9 +99,7 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	missing := waitWSBootstrap(ctx, book, symbols, bootstrap, b.log)
 	if len(missing) > 0 {
 		b.log.Warn("WS bootstrap timeout, continue with partial set",
-			zap.Int("missing", len(missing)),
-			zap.Strings("symbols_missing", missing),
-		)
+			zap.Int("missing", len(missing)), zap.Strings("symbols_missing", missing))
 	} else {
 		b.log.Info("WS book ready for all symbols")
 	}
@@ -110,22 +110,22 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	}
 
 	cex := &wsCEX{book: book}
-
 	tiersToTest := b.cfg.DEX.FeeTiers
 	if len(tiersToTest) == 0 {
 		tiersToTest = []uint32{100, 500, 3000, 10000}
 	}
+
 	usdt := common.HexToAddress(b.cfg.DEX.USDT)
 	if usdt == (common.Address{}) {
 		b.log.Fatal("DEX.USDT address is empty in config")
 	}
 
+	// оставляем ровно 3 пары (как просил)
 	filtered := make([]discovery.PairMeta, 0, 3)
 	perPairTiers := make(map[string][]uint32, 3)
 
 	for _, pm := range pairs {
 		base := common.HexToAddress(pm.Addr)
-
 		present, _, err := univ3.CheckAvailableFeeTiers(ctx, b.cfg.Chain.RPCHTTP, base, usdt, tiersToTest)
 		if err != nil {
 			b.log.Debug("fee tiers check failed", zap.String("pair", pm.Symbol), zap.Error(err))
@@ -135,11 +135,9 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 			b.log.Debug("no direct USDT pool on given tiers", zap.String("pair", pm.Symbol))
 			continue
 		}
-
 		perPairTiers[pm.Symbol] = present
 		filtered = append(filtered, pm)
 		b.log.Info("pair allowed (has USDT pool)", zap.String("pair", pm.Symbol), zap.Uint32s("tiers", present))
-
 		if len(filtered) == 3 {
 			break
 		}
@@ -149,13 +147,13 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 		b.log.Fatal("no pairs with direct USDT pools on given fee tiers; aborting")
 	}
 	if len(filtered) < 3 {
-		b.log.Warn("less than 3 pairs qualified; proceeding with what we have", zap.Int("count", len(filtered)))
+		b.log.Warn("less than 3 pairs qualified; proceeding", zap.Int("count", len(filtered)))
 	}
 
 	for _, pm := range filtered {
 		pm := pm
 		ft := perPairTiers[pm.Symbol]
-		go b.runPairPipeline(ctx, pm, cex, quoter, ft)
+		go b.runPairPipeline(ctx, pm, cex, quoter, ft, store) // ★ передаём store
 	}
 
 	<-ctx.Done()
@@ -167,7 +165,8 @@ func (b *Bot) runPairPipeline(
 	pm discovery.PairMeta,
 	cex *wsCEX,
 	quoter univ3.Quoter,
-	feeTiersOverride []uint32, // ⬅️ добавили
+	feeTiersOverride []uint32,
+	store *dash.Store, // ★ новое
 ) {
 	cfg := *b.cfg
 	cfg.Pair = pm.Symbol
@@ -175,11 +174,35 @@ func (b *Bot) runPairPipeline(
 		cfg.DEX.FeeTiers = feeTiersOverride
 	}
 
-	mdCh := make(chan marketdata.Snapshot, 64)
+	mdCh := make(chan marketdata.Snapshot, 64)    // сырые снапы
+	mdToDet := make(chan marketdata.Snapshot, 64) // снапы → детектор
 	oppCh := make(chan types.Opportunity, 64)
 
+	// marketdata → mdCh
 	go marketdata.Run(ctx, &cfg, pm, cex, quoter, mdCh, b.log)
-	go detector.Run(ctx, &cfg, mdCh, oppCh, b.log)
+
+	// фан-аут: в Store дашборда + в детектор
+	baseSym := strings.Split(cfg.Pair, "_")[0]
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case s := <-mdCh:
+				// обновляем строку для фронта
+				store.Update(cfg.Pair, baseSym, s, cfg.Trade.BaseQty)
+				// не блокируем детектор
+				select {
+				case mdToDet <- s:
+				default:
+					b.log.Warn("detector channel full; dropping snapshot", zap.String("pair", cfg.Pair))
+				}
+			}
+		}
+	}()
+
+	// поток возможностей
+	go detector.Run(ctx, &cfg, mdToDet, oppCh, b.log)
 
 	if cfg.DryRun {
 		b.log.Warn("DRY-RUN: no real orders/swaps will be sent", zap.String("pair", cfg.Pair))
@@ -212,7 +235,7 @@ func (b *Bot) runPairPipeline(
 		}
 		riskEng := risk.NewEngine(&cfg)
 		baseAddr := common.HexToAddress(pm.Addr)
-		exec, err := execution.NewExecutor(&cfg, nil, router, riskEng, b.log, baseAddr)
+		exec, err := execution.NewExecutor(&cfg, nil, router, riskEng, b.log, baseAddr) // динамический base
 		if err != nil {
 			b.log.Fatal("failed to initialize executor", zap.String("pair", cfg.Pair), zap.Error(err))
 		}
@@ -222,6 +245,8 @@ func (b *Bot) runPairPipeline(
 	b.log.Info("pipeline started", zap.String("pair", cfg.Pair), zap.String("addr", pm.Addr))
 }
 
+// ===== WS-кэш книги MEXC и вспомогательные =====
+
 type BookCache struct {
 	mu   sync.RWMutex
 	bids map[string]float64
@@ -229,10 +254,7 @@ type BookCache struct {
 }
 
 func NewBookCache() *BookCache {
-	return &BookCache{
-		bids: make(map[string]float64, 64),
-		asks: make(map[string]float64, 64),
-	}
+	return &BookCache{bids: make(map[string]float64, 64), asks: make(map[string]float64, 64)}
 }
 
 func (bc *BookCache) Set(symbol string, bid, ask float64) {
@@ -296,9 +318,7 @@ func waitWSBootstrap(ctx context.Context, book *BookCache, symbols []string, tim
 
 type wsCEX struct{ book *BookCache }
 
-func (w *wsCEX) BestBidAsk(symbol string) (float64, float64, error) {
-	return w.book.BestBidAsk(symbol)
-}
+func (w *wsCEX) BestBidAsk(symbol string) (float64, float64, error) { return w.book.BestBidAsk(symbol) }
 
 func NewLogger() (*zap.Logger, error) {
 	cfg := zap.NewProductionConfig()
