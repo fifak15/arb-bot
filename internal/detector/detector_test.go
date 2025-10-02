@@ -121,7 +121,6 @@ func TestEvaluate_ZeroPrice(t *testing.T) {
 	log := zap.NewNop()
 	out := make(chan types.Opportunity, 1)
 
-	// Test CEX_BUY_DEX_SELL with zero price
 	snap1 := marketdata.Snapshot{BestAskCEX: 0, DexOutUSD: 2000}
 	evaluateCexBuyDexSell(cfg, snap1, out, log)
 	select {
