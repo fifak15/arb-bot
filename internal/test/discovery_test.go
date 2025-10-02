@@ -1,4 +1,4 @@
-package discovery
+package test
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/you/arb-bot/internal/config"
+	"github.com/you/arb-bot/internal/discovery"
 	"github.com/you/arb-bot/internal/screener"
 	"go.uber.org/zap"
 )
@@ -41,7 +42,7 @@ func mockMexcAPI(t *testing.T) *httptest.Server {
 			http.NotFound(w, r)
 			return
 		}
-		tickers := []t24{
+		tickers := []discovery.t24{
 			{Symbol: "ETHUSDT", QuoteVolume: "1000000"},
 			{Symbol: "BTCUSDT", QuoteVolume: "2000000"},
 			{Symbol: "SOLUSDT", QuoteVolume: "500000"},
@@ -79,7 +80,7 @@ func TestDiscoveryService_Run_Success(t *testing.T) {
 
 	// Create service and run
 	log := zap.NewNop()
-	service := NewService(cfg, log)
+	service := discovery.NewService(cfg, log)
 
 	pairs, err := service.Discover(context.Background())
 	assert.NoError(t, err)
@@ -98,7 +99,7 @@ func TestDiscoveryService_Run_APIFailure(t *testing.T) {
 	cfg.MEXC.RestURL = mexcServer.URL
 
 	log := zap.NewNop()
-	service := NewService(cfg, log)
+	service := discovery.NewService(cfg, log)
 
 	_, err := service.Discover(context.Background())
 	assert.Error(t, err, "expected an error when the API fails")

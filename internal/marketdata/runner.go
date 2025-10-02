@@ -66,13 +66,11 @@ func Run(
 			mid := 0.5 * (bid + ask)
 			imetrics.CEXMid.Set(mid)
 
-			// Quote for CEX_BUY_DEX_SELL
 			startedSell := time.Now()
 			dexOut, gasSell, sellFee, errSell := quoter.QuoteDexOutUSD(ctx, baseTokenAddr, quoteTokenAddr, cfg.Trade.BaseQty, mid)
 			if errSell != nil {
 				imetrics.QuoterErrors.Inc()
 				log.Warn("quoter failed (dex sell)", zap.Error(errSell))
-				// continue? or publish partial? for now, skip.
 				continue
 			}
 			log.Info("dex quote ok (sell)",
