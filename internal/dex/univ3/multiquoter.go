@@ -169,7 +169,7 @@ func (q *MultiQuoter) QuoteDexOutUSD(ctx context.Context, tokenIn, tokenOut comm
 
 	for i, result := range results {
 		if !result.Success {
-			q.log.Debug("quote call failed in multicall", zap.Uint32("fee", tiers[i]))
+			//q.log.Debug("quote call failed in multicall", zap.Uint32("fee", tiers[i]))
 			continue
 		}
 

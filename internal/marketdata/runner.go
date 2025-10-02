@@ -60,7 +60,11 @@ func Run(
 				continue
 			}
 			if bid == 0 || ask == 0 {
-				log.Debug("cex book empty or zero", zap.String("pair", cfg.Pair), zap.Float64("bid", bid), zap.Float64("ask", ask))
+				log.Debug("cex book empty or zero",
+					zap.String("pair", cfg.Pair),
+					zap.Float64("bid", bid),
+					zap.Float64("ask", ask),
+				)
 				continue
 			}
 
@@ -72,37 +76,54 @@ func Run(
 			if errSell != nil {
 				imetrics.QuoterErrors.Inc()
 				if strings.Contains(errSell.Error(), "no working quoter found") {
-					log.Debug("quoter failed (dex sell)", zap.Error(errSell))
+					log.Debug("quoter failed (dex sell)", zap.String("pair", cfg.Pair), zap.Error(errSell))
 				} else {
-					log.Warn("quoter failed (dex sell)", zap.Error(errSell))
+					log.Warn("quoter failed (dex sell)", zap.String("pair", cfg.Pair), zap.Error(errSell))
 				}
 				continue
 			}
 			log.Info("dex quote ok (sell)",
+				zap.String("pair", cfg.Pair),
 				zap.Float64("out_usd", dexOut),
 				zap.Float64("gas_usd", gasSell),
 				zap.Uint32("fee_tier", sellFee),
 				zap.Duration("took", time.Since(startedSell)),
 			)
 
-			// Quote for DEX_BUY_CEX_SELL
+			dexSellPx := dexOut / cfg.Trade.BaseQty
+			diffSellPct := (dexSellPx/ask - 1.0) * 100.0
+			log.Info("spread CEX→DEX (sell)",
+				zap.String("pair", cfg.Pair),
+				zap.Float64("cex_price_ask", ask),
+				zap.Float64("dex_price", dexSellPx),
+				zap.Float64("diff_pct", diffSellPct),
+			)
 			startedBuy := time.Now()
 			dexIn, gasBuy, buyFee, errBuy := quoter.QuoteDexInUSD(ctx, quoteTokenAddr, baseTokenAddr, cfg.Trade.BaseQty, mid)
 			if errBuy != nil {
 				imetrics.QuoterErrors.Inc()
-				log.Warn("quoter failed (dex buy)", zap.Error(errBuy))
-				continue
+				log.Warn("quoter failed (dex buy)", zap.String("pair", cfg.Pair), zap.Error(errBuy))
+			} else {
+				log.Info("dex quote ok (buy)",
+					zap.String("pair", cfg.Pair),
+					zap.Float64("in_usd", dexIn),
+					zap.Float64("gas_usd", gasBuy),
+					zap.Uint32("fee_tier", buyFee),
+					zap.Duration("took", time.Since(startedBuy)),
+				)
+
+				dexBuyPx := dexIn / cfg.Trade.BaseQty
+				diffBuyPct := (bid/dexBuyPx - 1.0) * 100.0
+				log.Info("spread DEX→CEX (buy)",
+					zap.String("pair", cfg.Pair),
+					zap.Float64("cex_price_bid", bid),
+					zap.Float64("dex_price", dexBuyPx),
+					zap.Float64("diff_pct", diffBuyPct),
+				)
 			}
-			log.Info("dex quote ok (buy)",
-				zap.Float64("in_usd", dexIn),
-				zap.Float64("gas_usd", gasBuy),
-				zap.Uint32("fee_tier", buyFee),
-				zap.Duration("took", time.Since(startedBuy)),
-			)
 
 			imetrics.DexOutUSD.Set(dexOut)
 			imetrics.GasUSD.Set(gasSell)
-
 			snap := Snapshot{
 				BestAskCEX:     ask,
 				BestBidCEX:     bid,
@@ -114,9 +135,11 @@ func Run(
 				DexBuyFeeTier:  buyFee,
 				Ts:             time.Now(),
 			}
+
+			// публикация снапшота
 			select {
 			case out <- snap:
-			// OK
+				// ok
 			case <-ctx.Done():
 				log.Info("marketdata runner stopped while publishing")
 				return
