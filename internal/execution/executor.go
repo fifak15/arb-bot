@@ -40,22 +40,44 @@ type Executor struct {
 	log          *zap.Logger
 	ec           *ethclient.Client
 	usdxDecimals int
+
+	baseAddr     common.Address
+	baseDecimals int
 }
 
-func NewExecutor(cfg *config.Config, cex cexIface, router routerIface, risk Risk, log *zap.Logger) (*Executor, error) {
+func NewExecutor(cfg *config.Config, cex cexIface, router routerIface, risk Risk, log *zap.Logger, baseAddr common.Address) (*Executor, error) {
 	ec, err := ethclient.Dial(cfg.Chain.RPCHTTP)
 	if err != nil {
 		return nil, fmt.Errorf("dial rpc for executor: %w", err)
 	}
 
-	e := &Executor{cfg: cfg, cex: cex, router: router, risk: risk, log: log, ec: ec}
+	e := &Executor{
+		cfg:      cfg,
+		cex:      cex,
+		router:   router,
+		risk:     risk,
+		log:      log,
+		ec:       ec,
+		baseAddr: baseAddr,
+	}
 
 	usdxDec, err := e.fetchDecimals(context.Background(), common.HexToAddress(cfg.DEX.USDT))
 	if err != nil {
 		return nil, fmt.Errorf("fetch stablecoin decimals: %w", err)
 	}
 	e.usdxDecimals = usdxDec
-	log.Info("Executor initialized", zap.Int("stablecoin_decimals", usdxDec))
+
+	baseDec, err := e.fetchDecimals(context.Background(), baseAddr)
+	if err != nil {
+		return nil, fmt.Errorf("fetch base token decimals: %w", err)
+	}
+	e.baseDecimals = baseDec
+
+	e.log.Info("Executor initialized",
+		zap.Int("stablecoin_decimals", usdxDec),
+		zap.Int("base_token_decimals", baseDec),
+		zap.String("base_token_addr", baseAddr.Hex()),
+	)
 
 	return e, nil
 }
@@ -92,7 +114,6 @@ func (e *Executor) handleCexBuyDexSell(ctx context.Context, opp types.Opportunit
 	log := e.log.With(zap.String("direction", "CEX_BUY_DEX_SELL"))
 	log.Info("Executing opportunity")
 
-	// 1. Buy on CEX
 	orderID, filled, avgPx, err := e.cex.PlaceIOC(ctx, e.cfg.Pair, "BUY", opp.QtyBase, opp.BuyPxCEX)
 	if err != nil || filled <= 0 {
 		log.Warn("IOC on CEX failed or not filled", zap.Error(err), zap.Float64("filled", filled))
@@ -100,24 +121,24 @@ func (e *Executor) handleCexBuyDexSell(ctx context.Context, opp types.Opportunit
 	}
 	log.Info("CEX buy order filled", zap.String("orderID", orderID), zap.Float64("filled_qty", filled), zap.Float64("avg_px", avgPx))
 
-	// 2. Sell on DEX
 	scale := filled / opp.QtyBase
 	expectedOutUSD := opp.DexOutUSD * scale
 	slippage := 1.0 - float64(e.cfg.Risk.MaxSlippageBps)/10000.0
+
 	minOut := new(big.Float).Mul(big.NewFloat(expectedOutUSD*slippage), big.NewFloat(math.Pow10(e.usdxDecimals)))
 	minOutInt, _ := minOut.Int(nil)
 
-	inWei := new(big.Int)
-	new(big.Float).Mul(big.NewFloat(filled), big.NewFloat(1e18)).Int(inWei)
+	scaleBase := new(big.Float).SetFloat64(math.Pow10(e.baseDecimals))
+	inBase := new(big.Int)
+	new(big.Float).Mul(big.NewFloat(filled), scaleBase).Int(inBase)
 
-	wethAddr := common.HexToAddress(e.cfg.DEX.WETH)
+	baseAddr := e.baseAddr
 	usdxAddr := common.HexToAddress(e.cfg.DEX.USDT)
 
-	tx, err := e.router.SwapExactInput(ctx, wethAddr, usdxAddr, inWei, minOutInt, opp.DexFeeTier)
+	tx, err := e.router.SwapExactInput(ctx, baseAddr, usdxAddr, inBase, minOutInt, opp.DexFeeTier)
 	if err != nil {
 		log.Error("DEX swap failed, attempting to reverse CEX trade", zap.Error(err))
-		// REVERSAL: Sell the WETH back on the CEX to neutralize position
-		_, _, _, revErr := e.cex.PlaceIOC(ctx, e.cfg.Pair, "SELL", filled, avgPx*(1.0-0.01)) // Sell at 1% lower to ensure fill
+		_, _, _, revErr := e.cex.PlaceIOC(ctx, e.cfg.Pair, "SELL", filled, avgPx*(1.0-0.01)) // -1% для вероятного мгновенного исполнения
 		if revErr != nil {
 			log.Error("FATAL: CEX reversal trade failed, manual intervention required", zap.Error(revErr), zap.Float64("stuck_qty", filled))
 		} else {
@@ -138,31 +159,30 @@ func (e *Executor) handleDexBuyCexSell(ctx context.Context, opp types.Opportunit
 	log := e.log.With(zap.String("direction", "DEX_BUY_CEX_SELL"))
 	log.Info("Executing opportunity")
 
-	// 1. Buy on DEX (ExactOutput to get the specific amount of WETH we want to sell on CEX)
-	amountOutWei := new(big.Int)
-	new(big.Float).Mul(big.NewFloat(opp.QtyBase), big.NewFloat(1e18)).Int(amountOutWei)
+	scaleBase := new(big.Float).SetFloat64(math.Pow10(e.baseDecimals))
+	amountOutBase := new(big.Int)
+	new(big.Float).Mul(big.NewFloat(opp.QtyBase), scaleBase).Int(amountOutBase)
 
 	slippage := 1.0 + float64(e.cfg.Risk.MaxSlippageBps)/10000.0
 	maxIn := new(big.Float).Mul(big.NewFloat(opp.DexInUSD*slippage), big.NewFloat(math.Pow10(e.usdxDecimals)))
 	maxInInt, _ := maxIn.Int(nil)
 
-	wethAddr := common.HexToAddress(e.cfg.DEX.WETH)
+	baseAddr := e.baseAddr
 	usdxAddr := common.HexToAddress(e.cfg.DEX.USDT)
 
-	tx, err := e.router.SwapExactOutput(ctx, usdxAddr, wethAddr, amountOutWei, maxInInt, opp.DexFeeTier)
+	tx, err := e.router.SwapExactOutput(ctx, usdxAddr, baseAddr, amountOutBase, maxInInt, opp.DexFeeTier)
 	if err != nil {
 		log.Error("DEX swap failed", zap.Error(err))
 		return
 	}
 	log.Info("DEX buy swap executed", zap.String("tx_hash", tx))
 
-	// 2. Sell on CEX
+	// 2) Продаём на CEX купленный объём базового токена
 	orderID, filled, avgPx, err := e.cex.PlaceIOC(ctx, e.cfg.Pair, "SELL", opp.QtyBase, opp.SellPxCEX)
 	if err != nil || filled < opp.QtyBase*e.cfg.Risk.MinFillRatio {
 		log.Error("IOC on CEX failed or not filled sufficiently, attempting to reverse DEX trade", zap.Error(err), zap.Float64("filled_qty", filled))
-		// REVERSAL: Sell the WETH back on the DEX to neutralize position
-		// For simplicity, we use SwapExactInput here. A more robust implementation might use a time-decaying limit order.
-		_, revErr := e.router.SwapExactInput(ctx, wethAddr, usdxAddr, amountOutWei, big.NewInt(0), opp.DexFeeTier)
+		// REVERSAL: продаём купленный базовый токен обратно на DEX за стейбл
+		_, revErr := e.router.SwapExactInput(ctx, baseAddr, usdxAddr, amountOutBase, big.NewInt(0), opp.DexFeeTier)
 		if revErr != nil {
 			log.Error("FATAL: DEX reversal trade failed, manual intervention required", zap.Error(revErr), zap.Float64("stuck_qty", opp.QtyBase))
 		} else {

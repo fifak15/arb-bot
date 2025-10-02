@@ -211,7 +211,8 @@ func (b *Bot) runPairPipeline(
 			b.log.Fatal("failed to initialize uniswap router", zap.String("pair", cfg.Pair), zap.Error(err))
 		}
 		riskEng := risk.NewEngine(&cfg)
-		exec, err := execution.NewExecutor(&cfg, nil, router, riskEng, b.log)
+		baseAddr := common.HexToAddress(pm.Addr)
+		exec, err := execution.NewExecutor(&cfg, nil, router, riskEng, b.log, baseAddr)
 		if err != nil {
 			b.log.Fatal("failed to initialize executor", zap.String("pair", cfg.Pair), zap.Error(err))
 		}

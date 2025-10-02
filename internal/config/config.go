@@ -63,7 +63,6 @@ type Config struct {
 		Router   string   `yaml:"router"`
 		QuoterV1 string   `yaml:"quoter_v1"`
 		QuoterV2 string   `yaml:"quoter_v2"`
-		WETH     string   `yaml:"weth"`
 		USDT     string   `yaml:"usdt"`
 		FeeTier  uint32   `yaml:"fee_tier"`
 		FeeTiers []uint32 `yaml:"fee_tiers"`
