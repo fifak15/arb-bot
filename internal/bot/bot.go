@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -88,6 +89,20 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	}()
 	b.log.Info("subscribed to WS book ticker", zap.Strings("symbols", symbols))
 
+	bootstrap := b.cfg.ArbBot.BootstrapLookback
+	if bootstrap == 0 {
+		bootstrap = 5 * time.Second
+	}
+	missing := waitWSBootstrap(ctx, book, symbols, bootstrap, b.log)
+	if len(missing) > 0 {
+		b.log.Warn("WS bootstrap timeout, continue with partial set",
+			zap.Int("missing", len(missing)),
+			zap.Strings("symbols_missing", missing),
+		)
+	} else {
+		b.log.Info("WS book ready for all symbols")
+	}
+
 	quoter, err := univ3.NewMultiQuoter(b.cfg, b.log)
 	if err != nil {
 		b.log.Fatal("failed to initialize uniswap multiquoter", zap.Error(err))
@@ -158,7 +173,6 @@ func (b *Bot) runPairPipeline(
 	b.log.Info("pipeline started", zap.String("pair", cfg.Pair), zap.String("addr", pm.Addr))
 }
 
-// BookCache holds the latest bid/ask from the WebSocket feed.
 type BookCache struct {
 	mu   sync.RWMutex
 	bids map[string]float64
@@ -191,6 +205,48 @@ func (bc *BookCache) BestBidAsk(symbol string) (float64, float64, error) {
 		return 0, 0, fmt.Errorf("empty book for %s", symbol)
 	}
 	return bid, ask, nil
+}
+
+func (bc *BookCache) Has(symbol string) bool {
+	bc.mu.RLock()
+	_, ok1 := bc.bids[symbol]
+	_, ok2 := bc.asks[symbol]
+	bc.mu.RUnlock()
+	return ok1 && ok2
+}
+
+func waitWSBootstrap(ctx context.Context, book *BookCache, symbols []string, timeout time.Duration, log *zap.Logger) []string {
+	deadline := time.Now().Add(timeout)
+	missing := make(map[string]struct{}, len(symbols))
+	for _, s := range symbols {
+		missing[s] = struct{}{}
+	}
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		// remove those which arrived
+		for s := range missing {
+			if book.Has(s) {
+				delete(missing, s)
+			}
+		}
+		if len(missing) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			out := make([]string, 0, len(missing))
+			for s := range missing {
+				out = append(out, s)
+			}
+			sort.Strings(out)
+			return out
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick.C:
+		}
+	}
 }
 
 // wsCEX adapts BookCache to the marketdata.cexIface interface.

@@ -35,14 +35,13 @@ type cgListCoin struct {
 	Platforms map[string]string `json:"platforms"`
 }
 
-// mockMexcAPI creates a mock MEXC API server.
 func mockMexcAPI(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v3/ticker/24hr" {
 			http.NotFound(w, r)
 			return
 		}
-		tickers := []discovery.t24{
+		tickers := []discovery.T24{
 			{Symbol: "ETHUSDT", QuoteVolume: "1000000"},
 			{Symbol: "BTCUSDT", QuoteVolume: "2000000"},
 			{Symbol: "SOLUSDT", QuoteVolume: "500000"},

@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/big"
 	"strings"
+	"sync"
 
 	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -14,6 +15,16 @@ import (
 	"github.com/you/arb-bot/internal/config"
 	"go.uber.org/zap"
 )
+
+type Quoter interface {
+	QuoteDexOutUSD(ctx context.Context, tokenIn, tokenOut common.Address, qtyBase float64, ethUSD float64) (outUSD float64, gasUSD float64, feeTier uint32, err error)
+	QuoteDexInUSD(ctx context.Context, tokenIn, tokenOut common.Address, qtyBase float64, ethUSD float64) (inUSD float64, gasUSD float64, feeTier uint32, err error)
+}
+
+type Router interface {
+	SwapExactInput(ctx context.Context, tokenIn, tokenOut common.Address, amountIn *big.Int, minOut *big.Int, feeTier uint32) (txHash string, err error)
+	SwapExactOutput(ctx context.Context, tokenIn, tokenOut common.Address, amountOut *big.Int, maxIn *big.Int, feeTier uint32) (txHash string, err error)
+}
 
 const (
 	Multicall3Address = "0xcA11bde05977b3631167028862bE2a173976CA11"
@@ -28,7 +39,18 @@ type MultiQuoter struct {
 	eabi     abi.ABI
 	q2abi    abi.ABI
 	multiabi abi.ABI
+	decMu    sync.RWMutex
+	decCache map[common.Address]int
 }
+
+const erc20ABI = `[
+  {"inputs":[],"name":"decimals","outputs":[{"internalType":"uint8","name":"","type":"uint8"}],"stateMutability":"view","type":"function"}
+]`
+
+const quoterV2ABI = `[
+  {"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct IQuoterV2.QuoteExactInputSingleParams","name":"params","type":"tuple"}],"name":"quoteExactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceX96After","type":"uint160"},{"internalType":"uint32","name":"initializedTicksCrossed","type":"uint32"},{"internalType":"uint256","name":"gasEstimate","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},
+  {"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct IQuoterV2.QuoteExactOutputSingleParams","name":"params","type":"tuple"}],"name":"quoteExactOutputSingle","outputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceX96After","type":"uint160"},{"internalType":"uint32","name":"initializedTicksCrossed","type":"uint32"},{"internalType":"uint256","name":"gasEstimate","type":"uint256"}],"stateMutability":"nonpayable","type":"function"}
+]`
 
 // NewMultiQuoter creates a new MultiQuoter instance.
 func NewMultiQuoter(cfg *config.Config, log *zap.Logger) (Quoter, error) {
@@ -59,6 +81,7 @@ func NewMultiQuoter(cfg *config.Config, log *zap.Logger) (Quoter, error) {
 		eabi:     ercABI,
 		q2abi:    q2abi,
 		multiabi: multiABI,
+		decCache: make(map[common.Address]int),
 	}, nil
 }
 
@@ -294,6 +317,17 @@ func (q *MultiQuoter) QuoteDexInUSD(ctx context.Context, tokenIn, tokenOut commo
 }
 
 func (q *MultiQuoter) erc20Decimals(ctx context.Context, token common.Address) (int, error) {
+	if (token == common.Address{}) {
+		return 0, fmt.Errorf("decimals: zero token address")
+	}
+
+	q.decMu.RLock()
+	if d, ok := q.decCache[token]; ok {
+		q.decMu.RUnlock()
+		return d, nil
+	}
+	q.decMu.RUnlock()
+
 	input, err := q.eabi.Pack("decimals")
 	if err != nil {
 		return 0, fmt.Errorf("pack decimals: %w", err)
@@ -307,14 +341,20 @@ func (q *MultiQuoter) erc20Decimals(ctx context.Context, token common.Address) (
 		return 0, fmt.Errorf("decode decimals: %w", err)
 	}
 
+	var dec int
 	switch v := outs[0].(type) {
 	case uint8:
-		return int(v), nil
+		dec = int(v)
 	case *big.Int:
-		return int(v.Int64()), nil
+		dec = int(v.Int64())
 	default:
 		return 0, fmt.Errorf("unexpected decimals type %T", v)
 	}
+
+	q.decMu.Lock()
+	q.decCache[token] = dec
+	q.decMu.Unlock()
+	return dec, nil
 }
 
 func (q *MultiQuoter) estimateGasUSD(ctx context.Context, ethUSD float64) float64 {
@@ -334,4 +374,11 @@ func (q *MultiQuoter) estimateGasUSD(ctx context.Context, ethUSD float64) float6
 	eff := new(big.Int).Add(header.BaseFee, tip)
 	gasWei := new(big.Int).Mul(eff, new(big.Int).SetUint64(q.cfg.Chain.GasLimitSwap))
 	return weiToUSD(gasWei, ethUSD)
+}
+func weiToUSD(wei *big.Int, ethUSD float64) float64 {
+	f := new(big.Float).SetInt(wei)
+	f.Quo(f, big.NewFloat(1e18))
+	f.Mul(f, big.NewFloat(ethUSD))
+	out, _ := f.Float64()
+	return out
 }

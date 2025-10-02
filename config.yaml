@@ -15,9 +15,9 @@ redis:
   username: ""
   password: ""
   stream: "book:stream"
-  pubchan: "book:pub"   # если захочешь Pub/Sub
+  pubchan: "book:pub"
   active_key: "book:active"
-  snap_ns: "book:snap:" # префикс для HASH-ов
+  snap_ns: "book:snap:"
 
 
 chain:
@@ -30,9 +30,8 @@ chain:
 
 dex:
   # Внимание: адреса для ARBITRUM ONE
-  weth: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"   # WETH (Arbitrum)
   usdt: "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"   # USDT (Arbitrum)
-  fee_tiers: [500, 3000]                               # какие тиров проверять
+  fee_tiers: [ 100, 500, 3000, 10000 ]                               # какие тиров проверять
   quoter_v1: ""                                        # V1 можно не использовать на Arbitrum
   quoter_v2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"  # Uniswap V3 QuoterV2 (Arbitrum)
 
@@ -50,7 +49,7 @@ metrics:
   listen_addr: ":9090"
 
 timings:
-  quote_interval_ms: 300
+  quote_interval_ms: 600
   detector_tick_ms: 150
 
 discovery:
