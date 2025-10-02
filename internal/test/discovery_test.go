@@ -41,7 +41,10 @@ func mockMexcAPI(t *testing.T) *httptest.Server {
 			http.NotFound(w, r)
 			return
 		}
-		tickers := []discovery.T24{
+		tickers := []struct {
+			Symbol      string `json:"symbol"`
+			QuoteVolume string `json:"quoteVolume"`
+		}{
 			{Symbol: "ETHUSDT", QuoteVolume: "1000000"},
 			{Symbol: "BTCUSDT", QuoteVolume: "2000000"},
 			{Symbol: "SOLUSDT", QuoteVolume: "500000"},
