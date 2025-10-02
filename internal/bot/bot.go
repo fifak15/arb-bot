@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common" // ⬅️ добавили
 	"github.com/you/arb-bot/internal/config"
 	"github.com/you/arb-bot/internal/connectors/cex/mexc"
 	"github.com/you/arb-bot/internal/detector"
@@ -51,6 +52,7 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 		cancel()
 	}()
 
+	// 1) discovery
 	pairs, err := b.discovery.Discover(ctx)
 	if err != nil {
 		b.log.Fatal("pair discovery failed", zap.Error(err))
@@ -76,7 +78,6 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	if err != nil {
 		b.log.Fatal("failed to subscribe to book ticker", zap.Error(err))
 	}
-
 	go func() {
 		for {
 			select {
@@ -110,14 +111,51 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 
 	cex := &wsCEX{book: book}
 
-	monPairs := pairs
-	if len(monPairs) > 3 {
-		monPairs = monPairs[:3]
-		b.log.Warn("limiting DEX monitoring pairs", zap.Int("limit", 3))
+	tiersToTest := b.cfg.DEX.FeeTiers
+	if len(tiersToTest) == 0 {
+		tiersToTest = []uint32{100, 500, 3000, 10000}
 	}
-	for _, pm := range monPairs {
+	usdt := common.HexToAddress(b.cfg.DEX.USDT)
+	if usdt == (common.Address{}) {
+		b.log.Fatal("DEX.USDT address is empty in config")
+	}
+
+	filtered := make([]discovery.PairMeta, 0, 3)
+	perPairTiers := make(map[string][]uint32, 3)
+
+	for _, pm := range pairs {
+		base := common.HexToAddress(pm.Addr)
+
+		present, _, err := univ3.CheckAvailableFeeTiers(ctx, b.cfg.Chain.RPCHTTP, base, usdt, tiersToTest)
+		if err != nil {
+			b.log.Debug("fee tiers check failed", zap.String("pair", pm.Symbol), zap.Error(err))
+			continue
+		}
+		if len(present) == 0 {
+			b.log.Debug("no direct USDT pool on given tiers", zap.String("pair", pm.Symbol))
+			continue
+		}
+
+		perPairTiers[pm.Symbol] = present
+		filtered = append(filtered, pm)
+		b.log.Info("pair allowed (has USDT pool)", zap.String("pair", pm.Symbol), zap.Uint32s("tiers", present))
+
+		if len(filtered) == 3 {
+			break
+		}
+	}
+
+	if len(filtered) == 0 {
+		b.log.Fatal("no pairs with direct USDT pools on given fee tiers; aborting")
+	}
+	if len(filtered) < 3 {
+		b.log.Warn("less than 3 pairs qualified; proceeding with what we have", zap.Int("count", len(filtered)))
+	}
+
+	for _, pm := range filtered {
 		pm := pm
-		go b.runPairPipeline(ctx, pm, cex, quoter)
+		ft := perPairTiers[pm.Symbol]
+		go b.runPairPipeline(ctx, pm, cex, quoter, ft)
 	}
 
 	<-ctx.Done()
@@ -129,9 +167,13 @@ func (b *Bot) runPairPipeline(
 	pm discovery.PairMeta,
 	cex *wsCEX,
 	quoter univ3.Quoter,
+	feeTiersOverride []uint32, // ⬅️ добавили
 ) {
 	cfg := *b.cfg
 	cfg.Pair = pm.Symbol
+	if len(feeTiersOverride) > 0 {
+		cfg.DEX.FeeTiers = feeTiersOverride
+	}
 
 	mdCh := make(chan marketdata.Snapshot, 64)
 	oppCh := make(chan types.Opportunity, 64)
@@ -185,7 +227,6 @@ type BookCache struct {
 	asks map[string]float64
 }
 
-// NewBookCache creates a new BookCache.
 func NewBookCache() *BookCache {
 	return &BookCache{
 		bids: make(map[string]float64, 64),
@@ -193,7 +234,6 @@ func NewBookCache() *BookCache {
 	}
 }
 
-// Set updates the bid/ask for a symbol.
 func (bc *BookCache) Set(symbol string, bid, ask float64) {
 	bc.mu.Lock()
 	bc.bids[symbol] = bid
@@ -201,7 +241,6 @@ func (bc *BookCache) Set(symbol string, bid, ask float64) {
 	bc.mu.Unlock()
 }
 
-// BestBidAsk returns the best bid/ask for a symbol.
 func (bc *BookCache) BestBidAsk(symbol string) (float64, float64, error) {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
@@ -230,7 +269,6 @@ func waitWSBootstrap(ctx context.Context, book *BookCache, symbols []string, tim
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		// remove those which arrived
 		for s := range missing {
 			if book.Has(s) {
 				delete(missing, s)
@@ -255,14 +293,12 @@ func waitWSBootstrap(ctx context.Context, book *BookCache, symbols []string, tim
 	}
 }
 
-// wsCEX adapts BookCache to the marketdata.cexIface interface.
 type wsCEX struct{ book *BookCache }
 
 func (w *wsCEX) BestBidAsk(symbol string) (float64, float64, error) {
 	return w.book.BestBidAsk(symbol)
 }
 
-// NewLogger creates a new logger instance.
 func NewLogger() (*zap.Logger, error) {
 	cfg := zap.NewProductionConfig()
 	cfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)

@@ -25,12 +25,12 @@ chain:
   rpc_http: "https://arb1.arbitrum.io/rpc"
   rpc_ws:   "wss://arb1.arbitrum.io/ws"
   wallet_pk: ""
-  max_priority_fee_gwei: 0.1                      
+  max_priority_fee_gwei: 0.1
   gas_limit_swap: 180000
 
 dex:
   usdt: "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"
-  fee_tiers: [ 3000, 10000 ]
+  fee_tiers: [ 500, 3000, 10000 ]
   quoter_v1: ""
   quoter_v2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
 
