@@ -13,7 +13,6 @@ import (
 	"github.com/gorilla/websocket"
 
 	pb "github.com/you/arb-bot/internal/connectors/cex/mexc/pb"
-	// NEW: для protobuf
 	"google.golang.org/protobuf/proto"
 )
 

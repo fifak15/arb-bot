@@ -29,18 +29,14 @@ type Bot struct {
 	discovery *discovery.Service
 }
 
-// New creates a new Bot instance.
 func New(cfg *config.Config, log *zap.Logger) *Bot {
 	return &Bot{
-		cfg: cfg,
-		log: log,
-		// discovery без Redis
+		cfg:       cfg,
+		log:       log,
 		discovery: discovery.NewService(cfg, log),
 	}
 }
 
-// Run starts the bot's main loop.
-// runDiscovery больше не используется — всё делается в одном процессе.
 func (b *Bot) Run(ctx context.Context, _ bool) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -92,7 +88,6 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	}()
 	b.log.Info("subscribed to WS book ticker", zap.Strings("symbols", symbols))
 
-	// 3) Инициализируем UniswapV3 multiquoter и пайплайны.
 	quoter, err := univ3.NewMultiQuoter(b.cfg, b.log)
 	if err != nil {
 		b.log.Fatal("failed to initialize uniswap multiquoter", zap.Error(err))
@@ -114,7 +109,6 @@ func (b *Bot) runPairPipeline(
 	cex *wsCEX,
 	quoter univ3.Quoter,
 ) {
-	// Create a local copy of the config for the specific pair.
 	cfg := *b.cfg
 	cfg.Pair = pm.Symbol
 
