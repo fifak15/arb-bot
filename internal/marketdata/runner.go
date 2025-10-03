@@ -13,9 +13,20 @@ import (
 	"go.uber.org/zap"
 )
 
+type VenuePoint struct {
+	Venue      core.VenueID `json:"venue"`
+	SellPxUSD  float64      `json:"sellPxUSD"` // price per 1 base (base->USDT)
+	BuyPxUSD   float64      `json:"buyPxUSD"`  // price per 1 base (USDT->base, implied)
+	GasSellUSD float64      `json:"gasSellUSD"`
+	GasBuyUSD  float64      `json:"gasBuyUSD"`
+	FeeSell    uint32       `json:"feeSell"`
+	FeeBuy     uint32       `json:"feeBuy"`
+}
+
 type Snapshot struct {
 	BestAskCEX, BestBidCEX float64
 
+	// “лучший” по всем DEX (как было раньше)
 	DexOutUSD, GasSellUSD float64
 	DexSellFeeTier        uint32
 	DexSellVenue          core.VenueID
@@ -23,6 +34,9 @@ type Snapshot struct {
 	DexInUSD, GasBuyUSD float64
 	DexBuyFeeTier       uint32
 	DexBuyVenue         core.VenueID
+
+	// НОВОЕ: покомпактно по каждому venue
+	Venues []VenuePoint
 
 	Ts time.Time
 }
@@ -43,7 +57,7 @@ func Run(ctx context.Context, cfg *config.Config, pm discovery.PairMeta, cex cex
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			// 1) mid по торгуемой паре (для CEX цены)
+			// 1) CEX mid для пары
 			bid, ask, err := cex.BestBidAsk(cfg.Pair)
 			if err != nil || bid == 0 || ask == 0 {
 				if err != nil {
@@ -54,8 +68,8 @@ func Run(ctx context.Context, cfg *config.Config, pm discovery.PairMeta, cex cex
 			mid := 0.5 * (bid + ask)
 			imetrics.CEXMid.Set(mid)
 
-			// 2) НУЖНО: реальная цена ETH в USD для пересчёта газа
-			ethUSD := 2000.0 // безопасный дефолт
+			// 2) Цена ETH в USD для конвертации газа
+			ethUSD := 2000.0
 			if eb, ea, eerr := cex.BestBidAsk("ETHUSDT"); eerr == nil && eb > 0 && ea > 0 {
 				ethUSD = 0.5 * (eb + ea)
 			}
@@ -66,33 +80,47 @@ func Run(ctx context.Context, cfg *config.Config, pm discovery.PairMeta, cex cex
 				continue
 			}
 
-			var (
-				sellOut, sellGas float64
-				sellFee          uint32
-				sellVenue        core.VenueID
-				haveSell         bool
+			baseQty := cfg.Trade.BaseQty
+			type agg struct{ v VenuePoint }
+			per := make(map[core.VenueID]*agg, len(venues))
 
-				buyIn, buyGas float64
-				buyFee        uint32
-				buyVenue      core.VenueID
-				haveBuy       bool
+			var (
+				bestSellOut, bestSellGas float64
+				bestSellFee              uint32
+				bestSellVenue            core.VenueID
+				haveSell                 bool
+
+				bestBuyIn, bestBuyGas float64
+				bestBuyFee            uint32
+				bestBuyVenue          core.VenueID
+				haveBuy               bool
 
 				wg sync.WaitGroup
 				mu sync.Mutex
 			)
 
-			// SELL path: base -> USDT (exactInput)
-			for _, v := range venues {
-				v := v
+			// SELL path: base -> USDT
+			for _, ven := range venues {
+				ven := ven
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					outUSD, gasUSD, meta, err := v.Quoter.QuoteDexOutUSD(ctx, base, usdx, cfg.Trade.BaseQty, ethUSD)
+					outUSD, gasUSD, meta, err := ven.Quoter.QuoteDexOutUSD(ctx, base, usdx, baseQty, ethUSD)
 					if err == nil && outUSD > 0 {
 						mu.Lock()
-						if !haveSell || (outUSD-gasUSD) > (sellOut-sellGas) {
+						a := per[ven.ID]
+						if a == nil {
+							a = &agg{}
+							a.v.Venue = ven.ID
+							per[ven.ID] = a
+						}
+						a.v.SellPxUSD = outUSD / baseQty
+						a.v.GasSellUSD = gasUSD
+						a.v.FeeSell = meta.FeeTier
+
+						if !haveSell || (outUSD-gasUSD) > (bestSellOut-bestSellGas) {
 							haveSell = true
-							sellOut, sellGas, sellFee, sellVenue = outUSD, gasUSD, meta.FeeTier, v.ID
+							bestSellOut, bestSellGas, bestSellFee, bestSellVenue = outUSD, gasUSD, meta.FeeTier, ven.ID
 						}
 						mu.Unlock()
 					}
@@ -100,19 +128,29 @@ func Run(ctx context.Context, cfg *config.Config, pm discovery.PairMeta, cex cex
 			}
 			wg.Wait()
 
-			// BUY path: USDT -> base (exactOutput)
+			// BUY path: USDT -> base (exact output)
 			wg = sync.WaitGroup{}
-			for _, v := range venues {
-				v := v
+			for _, ven := range venues {
+				ven := ven
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					inUSD, gasUSD, meta, err := v.Quoter.QuoteDexInUSD(ctx, usdx, base, cfg.Trade.BaseQty, ethUSD)
+					inUSD, gasUSD, meta, err := ven.Quoter.QuoteDexInUSD(ctx, usdx, base, baseQty, ethUSD)
 					if err == nil && inUSD > 0 {
 						mu.Lock()
-						if !haveBuy || (inUSD+gasUSD) < (buyIn+buyGas) {
+						a := per[ven.ID]
+						if a == nil {
+							a = &agg{}
+							a.v.Venue = ven.ID
+							per[ven.ID] = a
+						}
+						a.v.BuyPxUSD = inUSD / baseQty
+						a.v.GasBuyUSD = gasUSD
+						a.v.FeeBuy = meta.FeeTier
+
+						if !haveBuy || (inUSD+gasUSD) < (bestBuyIn+bestBuyGas) {
 							haveBuy = true
-							buyIn, buyGas, buyFee, buyVenue = inUSD, gasUSD, meta.FeeTier, v.ID
+							bestBuyIn, bestBuyGas, bestBuyFee, bestBuyVenue = inUSD, gasUSD, meta.FeeTier, ven.ID
 						}
 						mu.Unlock()
 					}
@@ -128,21 +166,27 @@ func Run(ctx context.Context, cfg *config.Config, pm discovery.PairMeta, cex cex
 				continue
 			}
 
+			flat := make([]VenuePoint, 0, len(per))
+			for _, a := range per {
+				flat = append(flat, a.v)
+			}
+
 			snap := Snapshot{
 				BestAskCEX: ask,
 				BestBidCEX: bid,
 
-				DexOutUSD:      sellOut,
-				GasSellUSD:     sellGas,
-				DexSellFeeTier: sellFee,
-				DexSellVenue:   sellVenue,
+				DexOutUSD:      bestSellOut,
+				GasSellUSD:     bestSellGas,
+				DexSellFeeTier: bestSellFee,
+				DexSellVenue:   bestSellVenue,
 
-				DexInUSD:      buyIn,
-				GasBuyUSD:     buyGas,
-				DexBuyFeeTier: buyFee,
-				DexBuyVenue:   buyVenue,
+				DexInUSD:      bestBuyIn,
+				GasBuyUSD:     bestBuyGas,
+				DexBuyFeeTier: bestBuyFee,
+				DexBuyVenue:   bestBuyVenue,
 
-				Ts: time.Now(),
+				Venues: flat,
+				Ts:     time.Now(),
 			}
 
 			select {
