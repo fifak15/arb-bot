@@ -108,11 +108,15 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	} else {
 		b.log.Info("WS book ready for all symbols")
 	}
+
 	usdt := common.HexToAddress(b.cfg.DEX.USDT)
 	if usdt == (common.Address{}) {
 		b.log.Fatal("DEX.USDT address is empty in config")
 	}
 
+	// -------- Venues registration --------
+
+	// Uniswap v3
 	u3q, err := univ3.NewMultiQuoter(b.cfg, b.log)
 	if err != nil {
 		b.log.Fatal("failed to initialize uniswap multiquoter", zap.Error(err))
@@ -142,7 +146,6 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	if err != nil {
 		b.log.Warn("rpc dial failed for v2 adapters; V2 venues disabled", zap.Error(err))
 	} else {
-		// Sushi
 		if addr := strings.TrimSpace(b.cfg.DEX.Sushi.Router); addr != "" {
 			if sushi := common.HexToAddress(addr); sushi != (common.Address{}) {
 				v2Sushi, err := v2.New(ec, sushi, recipient, b.cfg.Chain.GasLimitSwap, pkRaw)
@@ -167,9 +170,6 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 		}
 	}
 
-	// ----------------------------
-	// 3) CEX trader (IOC) — ваш mexc.Client
-	// ----------------------------
 	var cexTrader *mexc.Client
 	if !b.cfg.DryRun {
 		cexTrader, err = mexc.NewClient(b.cfg, b.log)
@@ -184,6 +184,7 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 		tiersToTest = []uint32{100, 500, 3000, 10000}
 	}
 
+	// выбрать до 3 пар, где есть прямой пул base↔USDT
 	filtered := make([]discovery.PairMeta, 0, 3)
 	perPairTiers := make(map[string][]uint32, 3)
 	for _, pm := range pairs {
@@ -304,30 +305,55 @@ func (b *Bot) runPairPipeline(
 
 // ===== WS-кэш книги MEXC и вспомогательные =====
 
+const bookStaleness = 2 * time.Second
+
 type BookCache struct {
 	mu   sync.RWMutex
 	bids map[string]float64
 	asks map[string]float64
+	ts   map[string]time.Time // последний апдейт по символу
 }
 
 func NewBookCache() *BookCache {
-	return &BookCache{bids: make(map[string]float64, 64), asks: make(map[string]float64, 64)}
+	return &BookCache{
+		bids: make(map[string]float64, 64),
+		asks: make(map[string]float64, 64),
+		ts:   make(map[string]time.Time, 64),
+	}
 }
 
 func (bc *BookCache) Set(symbol string, bid, ask float64) {
 	bc.mu.Lock()
 	bc.bids[symbol] = bid
 	bc.asks[symbol] = ask
+	bc.ts[symbol] = time.Now()
 	bc.mu.Unlock()
 }
 
 func (bc *BookCache) BestBidAsk(symbol string) (float64, float64, error) {
 	bc.mu.RLock()
-	defer bc.mu.RUnlock()
 	bid := bc.bids[symbol]
 	ask := bc.asks[symbol]
+	bc.mu.RUnlock()
 	if bid == 0 || ask == 0 {
 		return 0, 0, fmt.Errorf("empty book for %s", symbol)
+	}
+	return bid, ask, nil
+}
+
+// свежая котировка с проверкой возраста
+func (bc *BookCache) BestBidAskFresh(symbol string, maxAge time.Duration) (float64, float64, error) {
+	bc.mu.RLock()
+	bid := bc.bids[symbol]
+	ask := bc.asks[symbol]
+	ts := bc.ts[symbol]
+	bc.mu.RUnlock()
+
+	if bid == 0 || ask == 0 {
+		return 0, 0, fmt.Errorf("empty book for %s", symbol)
+	}
+	if maxAge > 0 && time.Since(ts) > maxAge {
+		return 0, 0, fmt.Errorf("stale book for %s (age=%s)", symbol, time.Since(ts))
 	}
 	return bid, ask, nil
 }
@@ -340,6 +366,15 @@ func (bc *BookCache) Has(symbol string) bool {
 	return ok1 && ok2
 }
 
+func (bc *BookCache) HasFresh(symbol string, maxAge time.Duration) bool {
+	bc.mu.RLock()
+	_, ok1 := bc.bids[symbol]
+	_, ok2 := bc.asks[symbol]
+	ts := bc.ts[symbol]
+	bc.mu.RUnlock()
+	return ok1 && ok2 && (maxAge <= 0 || time.Since(ts) <= maxAge)
+}
+
 func waitWSBootstrap(ctx context.Context, book *BookCache, symbols []string, timeout time.Duration, log *zap.Logger) []string {
 	deadline := time.Now().Add(timeout)
 	missing := make(map[string]struct{}, len(symbols))
@@ -350,7 +385,7 @@ func waitWSBootstrap(ctx context.Context, book *BookCache, symbols []string, tim
 	defer tick.Stop()
 	for {
 		for s := range missing {
-			if book.Has(s) {
+			if book.HasFresh(s, bookStaleness) {
 				delete(missing, s)
 			}
 		}
@@ -375,7 +410,9 @@ func waitWSBootstrap(ctx context.Context, book *BookCache, symbols []string, tim
 
 type wsCEX struct{ book *BookCache }
 
-func (w *wsCEX) BestBidAsk(symbol string) (float64, float64, error) { return w.book.BestBidAsk(symbol) }
+func (w *wsCEX) BestBidAsk(symbol string) (float64, float64, error) {
+	return w.book.BestBidAskFresh(symbol, bookStaleness)
+}
 
 func NewLogger() (*zap.Logger, error) {
 	cfg := zap.NewProductionConfig()

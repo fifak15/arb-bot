@@ -72,7 +72,7 @@ func New(ec *ethclient.Client, router, recipient common.Address, gasLimit uint64
 	}
 
 	if gasLimit == 0 {
-		gasLimit = 400_000 // безопасный запас для v2-свапа
+		gasLimit = 400_000
 	}
 
 	return &V2{
@@ -92,13 +92,11 @@ func New(ec *ethclient.Client, router, recipient common.Address, gasLimit uint64
 // ---------- core.Quoter ----------
 
 func (v *V2) QuoteDexOutUSD(ctx context.Context, tokenIn, tokenOut common.Address, qtyBase, ethUSD float64) (outUSD, gasUSD float64, meta core.QuoteMeta, err error) {
-	// tokenIn -> tokenOut, exactInput
 	inWei, outDec, err := v.calcInWeiAndOutDecimals(ctx, tokenIn, tokenOut, qtyBase)
 	if err != nil {
 		return 0, 0, core.QuoteMeta{}, err
 	}
 
-	// amountsOut[1] = tokenOut amount
 	path := []common.Address{tokenIn, tokenOut}
 	data, _ := v.abi.Pack("getAmountsOut", inWei, path)
 	raw, err := v.ec.CallContract(ctx, ethereum.CallMsg{To: &v.router, Data: data}, nil)
@@ -113,19 +111,16 @@ func (v *V2) QuoteDexOutUSD(ctx context.Context, tokenIn, tokenOut common.Addres
 	if len(amounts) < 2 {
 		return 0, 0, core.QuoteMeta{}, errors.New("bad amounts length")
 	}
-	outFloat := toFloat(amounts[len(amounts)-1], outDec) // tokenOut units
-	outUSD = outFloat                                    // предполагаем стейбл (USDT/USDC)
+	outFloat := toFloat(amounts[len(amounts)-1], outDec)
+	outUSD = outFloat
 
-	// gas estimation for swapExactTokensForTokens(amountIn, 0, path, recipient, deadline)
 	deadline := big.NewInt(time.Now().Add(5 * time.Minute).Unix())
 	swapData, _ := v.abi.Pack("swapExactTokensForTokens", inWei, big.NewInt(0), path, v.recipient, deadline)
-	gasUSD, _ = v.estimateGasUSD(ctx, swapData, ethUSD) // игнор ошибки → fallback
-
+	gasUSD, _ = v.estimateGasUSD(ctx, swapData, ethUSD)
 	return outUSD, gasUSD, core.QuoteMeta{}, nil
 }
 
 func (v *V2) QuoteDexInUSD(ctx context.Context, tokenIn, tokenOut common.Address, qtyBase, ethUSD float64) (inUSD, gasUSD float64, meta core.QuoteMeta, err error) {
-	// хотим exactOutput = qtyBase токена tokenOut
 	outWei, inDec, err := v.calcOutWeiAndInDecimals(ctx, tokenIn, tokenOut, qtyBase)
 	if err != nil {
 		return 0, 0, core.QuoteMeta{}, err
@@ -145,10 +140,9 @@ func (v *V2) QuoteDexInUSD(ctx context.Context, tokenIn, tokenOut common.Address
 	if len(amounts) < 2 {
 		return 0, 0, core.QuoteMeta{}, errors.New("bad amounts length")
 	}
-	inFloat := toFloat(amounts[0], inDec) // tokenIn units
-	inUSD = inFloat                       // предполагаем стейбл
+	inFloat := toFloat(amounts[0], inDec)
+	inUSD = inFloat
 
-	// gas estimation for swapTokensForExactTokens(amountOut, maxIn, path, recipient, deadline)
 	inWei := new(big.Int).Set(amounts[0])
 	maxIn := new(big.Int).Mul(inWei, big.NewInt(102))
 	maxIn = new(big.Int).Div(maxIn, big.NewInt(100))
@@ -158,8 +152,6 @@ func (v *V2) QuoteDexInUSD(ctx context.Context, tokenIn, tokenOut common.Address
 
 	return inUSD, gasUSD, core.QuoteMeta{}, nil
 }
-
-// ---------- core.Router ----------
 
 func (v *V2) SwapExactInput(ctx context.Context, tokenIn, tokenOut common.Address, amountIn, minOut *big.Int, _ core.QuoteMeta) (string, error) {
 	if v.priv == nil {
@@ -248,7 +240,6 @@ func (v *V2) fetchDecimals(ctx context.Context, token common.Address) (int, erro
 }
 
 func (v *V2) estimateGasUSD(ctx context.Context, data []byte, ethUSD float64) (float64, error) {
-	// 1) Пытаемся оценить газ на узле; если не удалось — используем конфиг/запас
 	msg := ethereum.CallMsg{From: v.from, To: &v.router, Data: data}
 	gas, err := v.ec.EstimateGas(ctx, msg)
 	if err != nil || gas == 0 {
@@ -276,7 +267,6 @@ func (v *V2) estimateGasUSD(ctx context.Context, data []byte, ethUSD float64) (f
 	ethVal, _ := ethFloat.Float64()
 	gasUSD := ethVal * ethUSD
 
-	// sanity guard: фильтруем мусор
 	if !isFinite(gasUSD) || gasUSD < 0 {
 		return 0, errors.New("bad gasUSD")
 	}
