@@ -22,6 +22,16 @@ type DiscoveryCfg struct {
 	CoinGeckoVerbose bool   `yaml:"coingecko_verbose"`
 }
 
+type RedisCfg struct {
+	Addr      string `yaml:"addr"`
+	DB        int    `yaml:"db"`
+	Username  string `yaml:"username"`
+	Password  string `yaml:"password"`
+	ActiveKey string `yaml:"active_key"`
+	SnapNS    string `yaml:"snap_ns"`
+	Stream    string `yaml:"stream"`
+}
+
 type Config struct {
 	Pair      string       `yaml:"pair"`
 	Scenario  string       `yaml:"scenario"`
@@ -29,6 +39,7 @@ type Config struct {
 	DryRun    bool         `yaml:"dry_run"`
 	ArbBot    ArbBotCfg    `yaml:"-"`
 	Discovery DiscoveryCfg `yaml:"discovery"`
+	Redis     RedisCfg     `yaml:"redis"`
 	MEXC      struct {
 		ApiKey    string `yaml:"api_key"`
 		ApiSecret string `yaml:"api_secret"`
