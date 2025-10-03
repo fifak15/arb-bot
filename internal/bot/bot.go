@@ -12,11 +12,17 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
+
 	"github.com/you/arb-bot/internal/config"
 	"github.com/you/arb-bot/internal/connectors/cex/mexc"
-	"github.com/you/arb-bot/internal/dash" // ★ добавили
+	"github.com/you/arb-bot/internal/dash"
 	"github.com/you/arb-bot/internal/detector"
+	"github.com/you/arb-bot/internal/dex/adapters"
+	"github.com/you/arb-bot/internal/dex/core"
 	"github.com/you/arb-bot/internal/dex/univ3"
+	"github.com/you/arb-bot/internal/dex/v2"
 	"github.com/you/arb-bot/internal/discovery"
 	"github.com/you/arb-bot/internal/execution"
 	"github.com/you/arb-bot/internal/marketdata"
@@ -50,7 +56,7 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	go func() { <-sigs; b.log.Warn("received signal, shutting down..."); cancel() }()
 
-	// --- старт дашборда ---
+	// --- dashboard ---
 	store := dash.NewStore()
 	go dash.StartHTTP(ctx, store, ":8080") // http://localhost:8080
 
@@ -64,16 +70,15 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	}
 	b.log.Info("discovered pairs", zap.Int("count", len(pairs)))
 
+	// subscribe WS book ticker
 	symbols := make([]string, 0, len(pairs))
 	for _, pm := range pairs {
 		symbols = append(symbols, pm.Symbol)
 	}
-
 	wsURL := b.cfg.MEXC.WsURL
 	if wsURL == "" {
 		wsURL = "wss://wbs-api.mexc.com/ws"
 	}
-
 	book := NewBookCache()
 	bt := mexc.NewWS(wsURL)
 	wsStream, err := bt.SubscribeBookTicker(ctx, symbols)
@@ -103,27 +108,84 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	} else {
 		b.log.Info("WS book ready for all symbols")
 	}
-
-	quoter, err := univ3.NewMultiQuoter(b.cfg, b.log)
-	if err != nil {
-		b.log.Fatal("failed to initialize uniswap multiquoter", zap.Error(err))
-	}
-
-	cex := &wsCEX{book: book}
-	tiersToTest := b.cfg.DEX.FeeTiers
-	if len(tiersToTest) == 0 {
-		tiersToTest = []uint32{100, 500, 3000, 10000}
-	}
-
 	usdt := common.HexToAddress(b.cfg.DEX.USDT)
 	if usdt == (common.Address{}) {
 		b.log.Fatal("DEX.USDT address is empty in config")
 	}
 
-	// оставляем ровно 3 пары (как просил)
+	u3q, err := univ3.NewMultiQuoter(b.cfg, b.log)
+	if err != nil {
+		b.log.Fatal("failed to initialize uniswap multiquoter", zap.Error(err))
+	}
+	var u3Router core.Router
+	if r, err := univ3.NewRouter(b.cfg, b.log); err != nil {
+		b.log.Warn("uniswap v3 router disabled (will quote only)", zap.Error(err))
+		core.Register(&core.Venue{ID: core.VenueUniswapV3, Quoter: adapters.NewU3Quoter(u3q), Router: nil})
+	} else {
+		u3Router = adapters.NewU3Router(r)
+		core.Register(&core.Venue{ID: core.VenueUniswapV3, Quoter: adapters.NewU3Quoter(u3q), Router: u3Router})
+	}
+
+	// V2: Sushi & Camelot V2
+	var recipient common.Address
+	pkRaw := strings.TrimSpace(b.cfg.Chain.WalletPK)
+	if pkRaw == "" {
+		b.log.Warn("chain.wallet_pk is empty — V2 venues will quote only")
+	} else {
+		if key, err := crypto.HexToECDSA(strings.TrimPrefix(pkRaw, "0x")); err != nil {
+			b.log.Warn("invalid wallet_pk — V2 venues will quote only", zap.Error(err))
+		} else {
+			recipient = crypto.PubkeyToAddress(key.PublicKey)
+		}
+	}
+	ec, err := ethclient.Dial(b.cfg.Chain.RPCHTTP)
+	if err != nil {
+		b.log.Warn("rpc dial failed for v2 adapters; V2 venues disabled", zap.Error(err))
+	} else {
+		// Sushi
+		if addr := strings.TrimSpace(b.cfg.DEX.Sushi.Router); addr != "" {
+			if sushi := common.HexToAddress(addr); sushi != (common.Address{}) {
+				v2Sushi, err := v2.New(ec, sushi, recipient, b.cfg.Chain.GasLimitSwap, pkRaw)
+				if err != nil {
+					b.log.Warn("init sushi v2 failed", zap.Error(err))
+				} else {
+					core.Register(&core.Venue{ID: core.VenueSushiV2, Quoter: v2Sushi, Router: v2Sushi})
+					b.log.Info("registered venue", zap.String("venue", string(core.VenueSushiV2)), zap.String("router", sushi.Hex()))
+				}
+			}
+		}
+		if addr := strings.TrimSpace(b.cfg.DEX.CamelotV2.Router); addr != "" {
+			if camelot := common.HexToAddress(addr); camelot != (common.Address{}) {
+				v2Camelot, err := v2.New(ec, camelot, recipient, b.cfg.Chain.GasLimitSwap, pkRaw)
+				if err != nil {
+					b.log.Warn("init camelot v2 failed", zap.Error(err))
+				} else {
+					core.Register(&core.Venue{ID: core.VenueCamelotV2, Quoter: v2Camelot, Router: v2Camelot})
+					b.log.Info("registered venue", zap.String("venue", string(core.VenueCamelotV2)), zap.String("router", camelot.Hex()))
+				}
+			}
+		}
+	}
+
+	// ----------------------------
+	// 3) CEX trader (IOC) — ваш mexc.Client
+	// ----------------------------
+	var cexTrader *mexc.Client
+	if !b.cfg.DryRun {
+		cexTrader, err = mexc.NewClient(b.cfg, b.log)
+		if err != nil {
+			b.log.Fatal("failed to init MEXC client", zap.Error(err))
+		}
+	}
+
+	cexQuotes := &wsCEX{book: book}
+	tiersToTest := b.cfg.DEX.FeeTiers
+	if len(tiersToTest) == 0 {
+		tiersToTest = []uint32{100, 500, 3000, 10000}
+	}
+
 	filtered := make([]discovery.PairMeta, 0, 3)
 	perPairTiers := make(map[string][]uint32, 3)
-
 	for _, pm := range pairs {
 		base := common.HexToAddress(pm.Addr)
 		present, _, err := univ3.CheckAvailableFeeTiers(ctx, b.cfg.Chain.RPCHTTP, base, usdt, tiersToTest)
@@ -153,7 +215,7 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	for _, pm := range filtered {
 		pm := pm
 		ft := perPairTiers[pm.Symbol]
-		go b.runPairPipeline(ctx, pm, cex, quoter, ft, store) // ★ передаём store
+		go b.runPairPipeline(ctx, pm, cexQuotes, cexTrader, ft, store)
 	}
 
 	<-ctx.Done()
@@ -163,10 +225,10 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 func (b *Bot) runPairPipeline(
 	ctx context.Context,
 	pm discovery.PairMeta,
-	cex *wsCEX,
-	quoter univ3.Quoter,
+	cexQuotes *wsCEX,
+	cexTrader *mexc.Client,
 	feeTiersOverride []uint32,
-	store *dash.Store, // ★ новое
+	store *dash.Store,
 ) {
 	cfg := *b.cfg
 	cfg.Pair = pm.Symbol
@@ -174,14 +236,14 @@ func (b *Bot) runPairPipeline(
 		cfg.DEX.FeeTiers = feeTiersOverride
 	}
 
-	mdCh := make(chan marketdata.Snapshot, 64)    // сырые снапы
-	mdToDet := make(chan marketdata.Snapshot, 64) // снапы → детектор
+	mdCh := make(chan marketdata.Snapshot, 64)    // raw snapshots
+	mdToDet := make(chan marketdata.Snapshot, 64) // -> detector
 	oppCh := make(chan types.Opportunity, 64)
 
-	// marketdata → mdCh
-	go marketdata.Run(ctx, &cfg, pm, cex, quoter, mdCh, b.log)
+	// marketdata → mdCh (мульти-DEX берётся из core.Enabled(cfg.DEX.Venues))
+	go marketdata.Run(ctx, &cfg, pm, cexQuotes, mdCh, b.log)
 
-	// фан-аут: в Store дашборда + в детектор
+	// fan-out: dashboard + detector
 	baseSym := strings.Split(cfg.Pair, "_")[0]
 	go func() {
 		for {
@@ -189,9 +251,7 @@ func (b *Bot) runPairPipeline(
 			case <-ctx.Done():
 				return
 			case s := <-mdCh:
-				// обновляем строку для фронта
 				store.Update(cfg.Pair, baseSym, s, cfg.Trade.BaseQty)
-				// не блокируем детектор
 				select {
 				case mdToDet <- s:
 				default:
@@ -201,7 +261,7 @@ func (b *Bot) runPairPipeline(
 		}
 	}()
 
-	// поток возможностей
+	// opportunities
 	go detector.Run(ctx, &cfg, mdToDet, oppCh, b.log)
 
 	if cfg.DryRun {
@@ -214,6 +274,7 @@ func (b *Bot) runPairPipeline(
 				case opp := <-oppCh:
 					b.log.Info("opportunity",
 						zap.String("pair", cfg.Pair),
+						zap.String("venue", string(opp.DexVenue)),
 						zap.Float64("qty_base", opp.QtyBase),
 						zap.Float64("buy_px_cex", opp.BuyPxCEX),
 						zap.Float64("sell_px_cex", opp.SellPxCEX),
@@ -229,13 +290,9 @@ func (b *Bot) runPairPipeline(
 			}
 		}()
 	} else {
-		router, err := univ3.NewRouter(&cfg, b.log)
-		if err != nil {
-			b.log.Fatal("failed to initialize uniswap router", zap.String("pair", cfg.Pair), zap.Error(err))
-		}
 		riskEng := risk.NewEngine(&cfg)
 		baseAddr := common.HexToAddress(pm.Addr)
-		exec, err := execution.NewExecutor(&cfg, nil, router, riskEng, b.log, baseAddr) // динамический base
+		exec, err := execution.NewExecutor(&cfg, cexTrader, riskEng, b.log, baseAddr)
 		if err != nil {
 			b.log.Fatal("failed to initialize executor", zap.String("pair", cfg.Pair), zap.Error(err))
 		}

@@ -14,64 +14,97 @@ import (
 	"github.com/you/arb-bot/internal/marketdata"
 )
 
-// Row — формат строки для фронта
+// Row — теперь одна строка = (Pair, Venue)
 type Row struct {
-	Pair      string  `json:"pair"`
-	Base      string  `json:"base"`
-	CEXBid    float64 `json:"cexBid"`
-	CEXAsk    float64 `json:"cexAsk"`
-	DEXSellPx float64 `json:"dexSellPx"` // цена base→USDT при продаже base на DEX
-	DEXBuyPx  float64 `json:"dexBuyPx"`  // цена base→USDT, подразумеваемая из USDT->base
-	SpreadC2D float64 `json:"spreadC2D"` // (DEXSellPx/cexAsk) - 1
-	SpreadD2C float64 `json:"spreadD2C"` // (cexBid/DEXBuyPx) - 1
-	FeeSell   uint32  `json:"feeSell"`
-	FeeBuy    uint32  `json:"feeBuy"`
-	TS        int64   `json:"ts"`
+	Pair  string `json:"pair"`
+	Base  string `json:"base"`
+	Venue string `json:"venue"`
+
+	CEXBid float64 `json:"cexBid"`
+	CEXAsk float64 `json:"cexAsk"`
+
+	DEXSellPx float64 `json:"dexSellPx"`
+	DEXBuyPx  float64 `json:"dexBuyPx"`
+
+	SpreadC2D float64 `json:"spreadC2D"`
+	SpreadD2C float64 `json:"spreadD2C"`
+
+	FeeSell uint32 `json:"feeSell"`
+	FeeBuy  uint32 `json:"feeBuy"`
+
+	TS int64 `json:"ts"`
 }
 
 type Store struct {
 	mu   sync.RWMutex
-	rows map[string]Row // key: pair
+	rows map[string]Row // key: pair|venue
 }
 
-func NewStore() *Store { return &Store{rows: make(map[string]Row, 32)} }
+func NewStore() *Store { return &Store{rows: make(map[string]Row, 64)} }
 
-// Update — принять свежий снапшот и пересчитать поля строки.
-func (s *Store) Update(pair, base string, snap marketdata.Snapshot, baseQty float64) {
+// Update — принимает снапшот и создаёт строки по каждому venue
+func (s *Store) Update(pair, base string, snap marketdata.Snapshot, _ float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var dexSellPx, dexBuyPx float64
-	if baseQty > 0 {
-		if snap.DexOutUSD > 0 {
-			dexSellPx = snap.DexOutUSD / baseQty
+	if len(snap.Venues) == 0 {
+		// фоллбек: оставим “обобщённую” строку без venue
+		key := pair + "|best"
+		var dexSellPx, dexBuyPx float64
+		if snap.DexOutUSD > 0 && snap.DexSellVenue != "" {
+			// в старом формате цена за 1 base не передавалась — на фронт отдадим как есть (0 => "—")
 		}
-		if snap.DexInUSD > 0 {
-			dexBuyPx = snap.DexInUSD / baseQty
+		if snap.DexInUSD > 0 && snap.DexBuyVenue != "" {
 		}
+		s.rows[key] = Row{
+			Pair:      pair,
+			Base:      base,
+			Venue:     "best",
+			CEXBid:    snap.BestBidCEX,
+			CEXAsk:    snap.BestAskCEX,
+			DEXSellPx: dexSellPx,
+			DEXBuyPx:  dexBuyPx,
+			SpreadC2D: spreadC2D(dexSellPx, snap.BestAskCEX),
+			SpreadD2C: spreadD2C(snap.BestBidCEX, dexBuyPx),
+			FeeSell:   snap.DexSellFeeTier,
+			FeeBuy:    snap.DexBuyFeeTier,
+			TS:        time.Now().UnixMilli(),
+		}
+		return
 	}
 
-	var spreadC2D, spreadD2C float64
-	if snap.BestAskCEX > 0 && dexSellPx > 0 {
-		spreadC2D = dexSellPx/snap.BestAskCEX - 1.0
+	for _, v := range snap.Venues {
+		key := pair + "|" + string(v.Venue)
+		row := Row{
+			Pair:      pair,
+			Base:      base,
+			Venue:     string(v.Venue),
+			CEXBid:    snap.BestBidCEX,
+			CEXAsk:    snap.BestAskCEX,
+			DEXSellPx: v.SellPxUSD,
+			DEXBuyPx:  v.BuyPxUSD,
+			SpreadC2D: spreadC2D(v.SellPxUSD, snap.BestAskCEX),
+			SpreadD2C: spreadD2C(snap.BestBidCEX, v.BuyPxUSD),
+			FeeSell:   v.FeeSell,
+			FeeBuy:    v.FeeBuy,
+			TS:        time.Now().UnixMilli(),
+		}
+		s.rows[key] = row
 	}
-	if snap.BestBidCEX > 0 && dexBuyPx > 0 {
-		spreadD2C = snap.BestBidCEX/dexBuyPx - 1.0
-	}
+}
 
-	s.rows[pair] = Row{
-		Pair:      pair,
-		Base:      base,
-		CEXBid:    snap.BestBidCEX,
-		CEXAsk:    snap.BestAskCEX,
-		DEXSellPx: dexSellPx,
-		DEXBuyPx:  dexBuyPx,
-		SpreadC2D: spreadC2D,
-		SpreadD2C: spreadD2C,
-		FeeSell:   snap.DexSellFeeTier,
-		FeeBuy:    snap.DexBuyFeeTier,
-		TS:        time.Now().UnixMilli(),
+func spreadC2D(dexSellPx, cexAsk float64) float64 {
+	if dexSellPx > 0 && cexAsk > 0 {
+		return dexSellPx/cexAsk - 1
 	}
+	return 0
+}
+
+func spreadD2C(cexBid, dexBuyPx float64) float64 {
+	if cexBid > 0 && dexBuyPx > 0 {
+		return cexBid/dexBuyPx - 1
+	}
+	return 0
 }
 
 func (s *Store) List() []Row {
@@ -81,7 +114,12 @@ func (s *Store) List() []Row {
 		out = append(out, r)
 	}
 	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].Pair < out[j].Pair })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Pair == out[j].Pair {
+			return out[i].Venue < out[j].Venue
+		}
+		return out[i].Pair < out[j].Pair
+	})
 	return out
 }
 
@@ -148,24 +186,26 @@ const indexHTML = `<!doctype html>
   <div class="hdr">
     <div>
       <h1 style="margin:0;font-size:22px;font-weight:600">CEX ↔ DEX Monitor</h1>
-      <p class="sub">MEXC vs Uniswap v3 (Arbitrum)</p>
+      <p class="sub">MEXC vs Multi-DEX (Arbitrum)</p>
     </div>
     <div id="state" class="state">live</div>
   </div>
   <table>
     <thead>
       <tr>
-        <th>Pair</th><th>Base</th><th>CEX (bid/ask)</th><th>DEX (sell/buy px)</th>
-        <th>Spread CEX→DEX</th><th>Spread DEX→CEX</th><th>Fee (sell/buy)</th><th style="text-align:right">Updated</th>
+        <th>Pair</th><th>Base</th><th>Venue</th>
+        <th>CEX (bid/ask)</th><th>DEX (sell/buy px)</th>
+        <th>Spread CEX→DEX</th><th>Spread DEX→CEX</th><th>Fee (sell/buy)</th>
+        <th style="text-align:right">Updated</th>
       </tr>
     </thead>
     <tbody id="rows"></tbody>
   </table>
-  <p class="sub" style="margin-top:8px">Spreads: CEX→DEX = (DEX sell px / CEX ask) − 1, DEX→CEX = (CEX bid / DEX buy px) − 1.</p>
+  <p class="sub" style="margin-top:8px">Spreads: CEX→DEX = (DEX sell px / CEX ask) − 1, DEX→CEX = (CEX bid / DEX buy px) − 1. Строк по паре столько, сколько активных DEX-ов.</p>
 </div>
 <script>
-  function usd(x){ return (x==null||isNaN(x)) ? '—' : ('$'+Number(x).toLocaleString(undefined,{maximumFractionDigits:6})); }
-  function pct(x){ return (x==null||isNaN(x)) ? '—' : ((x*100).toFixed(3)+'%'); }
+  function usd(x){ return (x==null||isNaN(x)||x===0) ? '—' : ('$'+Number(x).toLocaleString(undefined,{maximumFractionDigits:6})); }
+  function pct(x){ return (x==null||isNaN(x)||x===0) ? '—' : ((x*100).toFixed(3)+'%'); }
   function rowHTML(r){
     var bestC2D = Math.abs(r.spreadC2D||0) >= Math.abs(r.spreadD2C||0);
     var c2dPos = (r.spreadC2D||0) > 0;
@@ -173,6 +213,7 @@ const indexHTML = `<!doctype html>
     return '<tr>'
       + '<td><strong>' + (r.pair||'') + '</strong></td>'
       + '<td><span class="chip">' + (r.base||'') + '</span></td>'
+      + '<td><span class="chip">' + (r.venue||'') + '</span></td>'
       + '<td>' + usd(r.cexBid) + ' <span style="color:#9CA3AF">/</span> ' + usd(r.cexAsk) + '</td>'
       + '<td>' + usd(r.dexSellPx) + ' <span style="color:#9CA3AF">/</span> ' + usd(r.dexBuyPx) + '</td>'
       + '<td><span class="pct ' + (bestC2D ? (c2dPos?'ok':'bad'):'dim') + '">' + pct(r.spreadC2D) + '</span></td>'

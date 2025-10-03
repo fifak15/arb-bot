@@ -2,7 +2,6 @@ package detector
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/you/arb-bot/internal/config"
@@ -14,6 +13,7 @@ import (
 func Run(ctx context.Context, cfg *config.Config, in <-chan marketdata.Snapshot, out chan<- types.Opportunity, log *zap.Logger) {
 	t := time.NewTicker(cfg.DetectorTick())
 	defer t.Stop()
+
 	var last marketdata.Snapshot
 
 	for {
@@ -23,88 +23,68 @@ func Run(ctx context.Context, cfg *config.Config, in <-chan marketdata.Snapshot,
 		case s := <-in:
 			last = s
 		case <-t.C:
-			// Determine which scenarios to check based on config
-			checkCexBuy := strings.ToUpper(cfg.Scenario) != string(types.DEXBuyCEXSell)
-			checkDexBuy := strings.ToUpper(cfg.Scenario) != string(types.CEXBuyDEXSell)
-
-			if checkCexBuy {
-				evaluateCexBuyDexSell(cfg, last, out, log)
+			if last.BestBidCEX == 0 || last.BestAskCEX == 0 {
+				continue
 			}
-			if checkDexBuy {
-				evaluateDexBuyCexSell(cfg, last, out, log)
+
+			qty := cfg.Trade.BaseQty
+			// CEX→DEX: купить на CEX, продать на DEX
+			if last.DexOutUSD > 0 {
+				buyPx := last.BestAskCEX
+				gross := last.DexOutUSD
+				cost := buyPx*qty + last.GasSellUSD
+				net := gross - cost
+				roi := 0.0
+				if cost > 0 {
+					roi = net / cost
+				}
+				opp := types.Opportunity{
+					Direction:  types.CEXBuyDEXSell,
+					QtyBase:    qty,
+					BuyPxCEX:   buyPx,
+					DexOutUSD:  last.DexOutUSD,
+					DexFeeTier: last.DexSellFeeTier,
+					DexVenue:   last.DexSellVenue,
+					GasUSD:     last.GasSellUSD,
+					NetUSD:     net,
+					ROI:        roi,
+					Ts:         last.Ts,
+				}
+				select {
+				case out <- opp:
+				default:
+					log.Warn("detector: opportunity channel full; dropping CEX→DEX")
+				}
 			}
-		}
-	}
-}
 
-// evaluateCexBuyDexSell checks for the "Buy on CEX, Sell on DEX" opportunity.
-func evaluateCexBuyDexSell(cfg *config.Config, snap marketdata.Snapshot, out chan<- types.Opportunity, log *zap.Logger) {
-	if snap.BestAskCEX == 0 || snap.DexOutUSD == 0 {
-		return
-	}
-
-	q := cfg.Trade.BaseQty
-	takerFee := snap.BestAskCEX * q * float64(cfg.MEXC.TakerFeeBps) / 10000.0
-	cost := snap.BestAskCEX*q + takerFee
-
-	midCEX := 0.5 * (snap.BestBidCEX + snap.BestAskCEX)
-	withdrawUSDCost := midCEX * cfg.MEXC.WithdrawalFeeBase
-	net := snap.DexOutUSD - cost - snap.GasSellUSD - withdrawUSDCost
-
-	roi := 0.0
-	if cost > 0 {
-		roi = net / cost
-	}
-
-	if net >= cfg.Risk.MinProfitUSD && roi >= (cfg.Risk.MinROIBps/10000.0) {
-		log.Info("Opportunity found: CEX_BUY_DEX_SELL", zap.Float64("net_usd", net), zap.Float64("roi_bps", roi*10000))
-		out <- types.Opportunity{
-			Direction:  types.CEXBuyDEXSell,
-			QtyBase:    q,
-			BuyPxCEX:   snap.BestAskCEX,
-			DexOutUSD:  snap.DexOutUSD,
-			GasUSD:     snap.GasSellUSD,
-			DexFeeTier: snap.DexSellFeeTier,
-			NetUSD:     net,
-			ROI:        roi,
-			Ts:         time.Now(),
-		}
-	}
-}
-
-// evaluateDexBuyCexSell checks for the "Buy on DEX, Sell on CEX" opportunity.
-func evaluateDexBuyCexSell(cfg *config.Config, snap marketdata.Snapshot, out chan<- types.Opportunity, log *zap.Logger) {
-	if snap.BestBidCEX == 0 || snap.DexInUSD == 0 {
-		return
-	}
-
-	q := cfg.Trade.BaseQty
-	cost := snap.DexInUSD + snap.GasBuyUSD
-
-	takerFee := snap.BestBidCEX * q * float64(cfg.MEXC.TakerFeeBps) / 10000.0
-	revenue := snap.BestBidCEX*q - takerFee
-
-	midCEX := 0.5 * (snap.BestBidCEX + snap.BestAskCEX)
-	withdrawUSDCost := midCEX * cfg.MEXC.WithdrawalFeeBase
-	net := revenue - cost - withdrawUSDCost
-
-	roi := 0.0
-	if cost > 0 {
-		roi = net / cost
-	}
-
-	if net >= cfg.Risk.MinProfitUSD && roi >= (cfg.Risk.MinROIBps/10000.0) {
-		log.Info("Opportunity found: DEX_BUY_CEX_SELL", zap.Float64("net_usd", net), zap.Float64("roi_bps", roi*10000))
-		out <- types.Opportunity{
-			Direction:  types.DEXBuyCEXSell,
-			QtyBase:    q,
-			SellPxCEX:  snap.BestBidCEX,
-			DexInUSD:   snap.DexInUSD,
-			GasUSD:     snap.GasBuyUSD,
-			DexFeeTier: snap.DexBuyFeeTier,
-			NetUSD:     net,
-			ROI:        roi,
-			Ts:         time.Now(),
+			// DEX→CEX: купить на DEX, продать на CEX
+			if last.DexInUSD > 0 {
+				sellPx := last.BestBidCEX
+				revenue := sellPx * qty
+				cost := last.DexInUSD + last.GasBuyUSD
+				net := revenue - cost
+				roi := 0.0
+				if cost > 0 {
+					roi = net / cost
+				}
+				opp := types.Opportunity{
+					Direction:  types.DEXBuyCEXSell,
+					QtyBase:    qty,
+					SellPxCEX:  sellPx,
+					DexInUSD:   last.DexInUSD,
+					DexFeeTier: last.DexBuyFeeTier,
+					DexVenue:   last.DexBuyVenue,
+					GasUSD:     last.GasBuyUSD,
+					NetUSD:     net,
+					ROI:        roi,
+					Ts:         last.Ts,
+				}
+				select {
+				case out <- opp:
+				default:
+					log.Warn("detector: opportunity channel full; dropping DEX→CEX")
+				}
+			}
 		}
 	}
 }
