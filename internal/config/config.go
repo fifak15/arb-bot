@@ -14,20 +14,22 @@ type ArbBotCfg struct {
 	BootstrapPoll     time.Duration `yaml:"-"`
 }
 
+type DiscoveryCfg struct {
+	FromRank         int    `yaml:"from_rank"`
+	ToRank           int    `yaml:"to_rank"`
+	Pick             int    `yaml:"pick"`
+	CoinGeckoKey     string `yaml:"coingecko_key"`
+	CoinGeckoVerbose bool   `yaml:"coingecko_verbose"`
+}
+
 type Config struct {
-	Pair     string    `yaml:"pair"`
-	Scenario string    `yaml:"scenario"`
-	Mode     string    `yaml:"mode"`
-	DryRun   bool      `yaml:"dry_run"`
-	ArbBot   ArbBotCfg `yaml:"-"`
-
-	Discovery struct {
-		FromRank int `yaml:"from_rank"`
-		ToRank   int `yaml:"to_rank"`
-		Pick     int `yaml:"pick"`
-	} `yaml:"discovery"`
-
-	MEXC struct {
+	Pair      string       `yaml:"pair"`
+	Scenario  string       `yaml:"scenario"`
+	Mode      string       `yaml:"mode"`
+	DryRun    bool         `yaml:"dry_run"`
+	ArbBot    ArbBotCfg    `yaml:"-"`
+	Discovery DiscoveryCfg `yaml:"discovery"`
+	MEXC      struct {
 		ApiKey    string `yaml:"api_key"`
 		ApiSecret string `yaml:"api_secret"`
 		RestURL   string `yaml:"rest_url"`
