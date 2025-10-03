@@ -1,33 +1,38 @@
-
-pair: "ETHUSDT"
-scenario: "CEX_BUY_DEX_SELL"
 mode: "real"
 dry_run: true
+
 mexc:
   api_key: "YOUR_MEXC_KEY"
   api_secret: "YOUR_MEXC_SECRET"
   rest_url: "https://api.mexc.com"
   ws_url: "wss://wbs-api.mexc.com/ws"
   withdrawal_fee_base: 0.0012
-  taker_fee_bps: 5    # 0.05% стандартный спот-тейкер
-  # taker_fee_bps: 4  # если включена MX Deduction (-20%)
-  # taker_fee_bps: 0  # если торгуем парой со 0% fee (на время акции)
+  taker_fee_bps: 5
+
+redis:
+  addr: "127.0.0.1:6379"
+  db: 0
+  username: ""
+  password: ""
+  stream: "book:stream"
+  pubchan: "book:pub"
+  active_key: "book:active"
+  snap_ns: "book:snap:"
+
 
 chain:
-  network: "ethereum"
-  rpc_http: "https://mainnet.infura.io/v3/395619ca594343a59f82e2fe7f71f8e4"
-  rpc_ws: "wss://mainnet.infura.io/ws/v3/395619ca594343a59f82e2fe7f71f8e4"
+  network: "arbitrum-one"
+  rpc_http: "https://arb1.arbitrum.io/rpc"
+  rpc_ws:   "wss://arb1.arbitrum.io/ws"
   wallet_pk: ""
-  max_priority_fee_gwei: 2
+  max_priority_fee_gwei: 0.1
   gas_limit_swap: 180000
 
 dex:
-  weth: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-  usdt: "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
-  fee_tiers: [500, 3000]
-  quoter_v1: "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"
+  usdt: "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"
+  fee_tiers: [ 500, 3000, 10000 ]
+  quoter_v1: ""
   quoter_v2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
-
 
 risk:
   max_slippage_bps: 50
@@ -43,5 +48,12 @@ metrics:
   listen_addr: ":9090"
 
 timings:
-  quote_interval_ms: 300
+  quote_interval_ms: 900
   detector_tick_ms: 150
+
+discovery:
+  from_rank: 100
+  to_rank: 600
+  pick: 15
+  coingecko_key: "CG-6xYAcpo3zeBewP95hk2UksPK"
+  coingecko_verbose: false

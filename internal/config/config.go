@@ -7,11 +7,39 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type RedisCfg struct {
+	Addr      string `yaml:"addr"`
+	DB        int    `yaml:"db"`
+	Username  string `yaml:"username"`
+	Password  string `yaml:"password"`
+	Stream    string `yaml:"stream"`
+	PubChan   string `yaml:"pubchan"`
+	ActiveKey string `yaml:"active_key"`
+	SnapNS    string `yaml:"snap_ns"`
+}
+
+type ArbBotCfg struct {
+	MinPairs          int           `yaml:"-"`
+	BootstrapLookback time.Duration `yaml:"-"`
+	BootstrapPoll     time.Duration `yaml:"-"`
+}
+
+type DiscoveryCfg struct {
+	FromRank         int    `yaml:"from_rank"`
+	ToRank           int    `yaml:"to_rank"`
+	Pick             int    `yaml:"pick"`
+	CoinGeckoKey     string `yaml:"coingecko_key"`
+	CoinGeckoVerbose bool   `yaml:"coingecko_verbose"`
+}
+
 type Config struct {
 	Pair     string `yaml:"pair"`
 	Scenario string `yaml:"scenario"`
 	Mode     string `yaml:"mode"`
 	DryRun   bool   `yaml:"dry_run"`
+
+	ArbBot    ArbBotCfg    `yaml:"-"`
+	Discovery DiscoveryCfg `yaml:"discovery"`
 
 	MEXC struct {
 		ApiKey            string  `yaml:"api_key"`
@@ -35,7 +63,6 @@ type Config struct {
 		Router   string   `yaml:"router"`
 		QuoterV1 string   `yaml:"quoter_v1"`
 		QuoterV2 string   `yaml:"quoter_v2"`
-		WETH     string   `yaml:"weth"`
 		USDT     string   `yaml:"usdt"`
 		FeeTier  uint32   `yaml:"fee_tier"`
 		FeeTiers []uint32 `yaml:"fee_tiers"`
@@ -61,6 +88,8 @@ type Config struct {
 		QuoteIntervalMs int `yaml:"quote_interval_ms"`
 		DetectorTickMs  int `yaml:"detector_tick_ms"`
 	} `yaml:"timings"`
+
+	Redis RedisCfg `yaml:"redis"`
 }
 
 func Load(path string) (*Config, error) {
@@ -80,6 +109,15 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Risk.MinFillRatio == 0 {
 		c.Risk.MinFillRatio = 0.7
+	}
+	if c.Redis.Stream == "" {
+		c.Redis.Stream = "book:stream"
+	}
+	if c.Redis.ActiveKey == "" {
+		c.Redis.ActiveKey = "book:active"
+	}
+	if c.Redis.SnapNS == "" {
+		c.Redis.SnapNS = "book:snap:"
 	}
 	return &c, nil
 }
