@@ -18,7 +18,6 @@ const (
 	cgBasePro  = "https://pro-api.coingecko.com/api/v3"
 )
 
-// Глобальный переключатель «болтливости» логов CoinGecko.
 var CGVerbose = true
 
 func vprintf(format string, args ...any) {
@@ -26,8 +25,6 @@ func vprintf(format string, args ...any) {
 		fmt.Printf(format, args...)
 	}
 }
-
-// ---------- Общие структуры / утилиты ----------
 
 type cgHTTPError struct {
 	Status        int

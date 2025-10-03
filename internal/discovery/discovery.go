@@ -26,22 +26,18 @@ type PairMeta struct {
 	CgID   string
 }
 
-// Service handles the discovery of new trading pairs.
 type Service struct {
 	cfg *config.Config
 	log *zap.Logger
 }
 
-// NewService creates a new discovery service.
 func NewService(cfg *config.Config, log *zap.Logger) *Service {
 	return &Service{cfg: cfg, log: log}
 }
 
-// Discover fetches, filters, enriches and returns pairs in-memory (no Redis).
 func (s *Service) Discover(ctx context.Context) ([]PairMeta, error) {
 	s.log.Info("starting pair discovery")
 
-	// 1) Fetch 24-hour ticker data from MEXC.
 	s.log.Info("fetching 24-hour ticker data from MEXC")
 	tickers, err := s.fetchTicker24h(ctx)
 	if err != nil {
@@ -51,7 +47,6 @@ func (s *Service) Discover(ctx context.Context) ([]PairMeta, error) {
 		return nil, fmt.Errorf("empty response on tickers")
 	}
 
-	// 2) Filter for /USDT pairs, sort by quote volume, and select a ranked window.
 	type row struct {
 		Sym         string
 		QV, LP, Vol float64
@@ -106,7 +101,6 @@ func (s *Service) Discover(ctx context.Context) ([]PairMeta, error) {
 		return nil, fmt.Errorf("failed to fetch coingecko index: %w", err)
 	}
 
-	// 4) Enrich pairs with contract addresses and filter for those on Arbitrum.
 	pairs := make([]screener.PairInfo, 0, len(window))
 	for i, r := range window {
 		base := strings.TrimSuffix(r.Sym, "USDT")
@@ -127,7 +121,6 @@ func (s *Service) Discover(ctx context.Context) ([]PairMeta, error) {
 		return nil, nil
 	}
 
-	// 5) Pick a random sample and return it.
 	pick := s.cfg.Discovery.Pick
 	if pick > len(withArb) {
 		pick = len(withArb)
@@ -136,7 +129,7 @@ func (s *Service) Discover(ctx context.Context) ([]PairMeta, error) {
 
 	out := make([]PairMeta, 0, len(sample))
 	nowMs := time.Now().UnixMilli()
-	_ = nowMs // оставлено на случай будущего логирования timestamp
+	_ = nowMs
 	for _, p := range sample {
 		out = append(out, PairMeta{
 			Symbol: p.Symbol,
