@@ -16,7 +16,7 @@ const (
 type PairMeta struct {
 	Symbol string `json:"symbol"`
 	Base   string `json:"base"`
-	Addr   string `json:"addr"` // arbitrum-one
+	Addr   string `json:"addr"`
 	CgID   string `json:"cg_id"`
 }
 
@@ -25,12 +25,13 @@ type Opportunity struct {
 	QtyBase    float64
 	BuyPxCEX   float64
 	SellPxCEX  float64
-	DexOutUSD  float64 // For CEXBuyDEXSell: how much USD we get for BaseQty
-	DexInUSD   float64 // For DEXBuyCEXSell: how much USD we need to buy BaseQty
+	DexOutUSD  float64
+	DexInUSD   float64
 	DexFeeTier uint32
 	DexVenue   core.VenueID
 
-	GasUSD, NetUSD float64
-	ROI            float64
-	Ts             time.Time
+	GasUSD float64
+	NetUSD float64
+	ROI    float64
+	Ts     time.Time
 }

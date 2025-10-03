@@ -4,34 +4,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/you/arb-bot/internal/dex/core" // <— проверь путь модуля
+	"github.com/you/arb-bot/internal/dex/core"
 	"gopkg.in/yaml.v3"
 )
-
-type RedisCfg struct {
-	Addr      string `yaml:"addr"`
-	DB        int    `yaml:"db"`
-	Username  string `yaml:"username"`
-	Password  string `yaml:"password"`
-	Stream    string `yaml:"stream"`
-	PubChan   string `yaml:"pubchan"`
-	ActiveKey string `yaml:"active_key"`
-	SnapNS    string `yaml:"snap_ns"`
-}
-
-type ArbBotCfg struct {
-	MinPairs          int           `yaml:"-"`
-	BootstrapLookback time.Duration `yaml:"-"`
-	BootstrapPoll     time.Duration `yaml:"-"`
-}
-
-type DiscoveryCfg struct {
-	FromRank         int    `yaml:"from_rank"`
-	ToRank           int    `yaml:"to_rank"`
-	Pick             int    `yaml:"pick"`
-	CoinGeckoKey     string `yaml:"coingecko_key"`
-	CoinGeckoVerbose bool   `yaml:"coingecko_verbose"`
-}
 
 type Config struct {
 	Pair     string `yaml:"pair"`
@@ -39,16 +14,17 @@ type Config struct {
 	Mode     string `yaml:"mode"`
 	DryRun   bool   `yaml:"dry_run"`
 
-	ArbBot    ArbBotCfg    `yaml:"-"`
-	Discovery DiscoveryCfg `yaml:"discovery"`
+	Discovery struct {
+		FromRank int `yaml:"from_rank"`
+		ToRank   int `yaml:"to_rank"`
+		Pick     int `yaml:"pick"`
+	} `yaml:"discovery"`
 
 	MEXC struct {
-		ApiKey            string  `yaml:"api_key"`
-		ApiSecret         string  `yaml:"api_secret"`
-		RestURL           string  `yaml:"rest_url"`
-		WsURL             string  `yaml:"ws_url"`
-		TakerFeeBps       int     `yaml:"taker_fee_bps"`
-		WithdrawalFeeBase float64 `yaml:"withdrawal_fee_base"`
+		ApiKey    string `yaml:"api_key"`
+		ApiSecret string `yaml:"api_secret"`
+		RestURL   string `yaml:"rest_url"`
+		WsURL     string `yaml:"ws_url"`
 	} `yaml:"mexc"`
 
 	Chain struct {
@@ -61,13 +37,17 @@ type Config struct {
 	} `yaml:"chain"`
 
 	DEX struct {
-		Router   string         `yaml:"router"`
-		QuoterV1 string         `yaml:"quoter_v1"`
-		QuoterV2 string         `yaml:"quoter_v2"`
 		USDT     string         `yaml:"usdt"`
-		FeeTier  uint32         `yaml:"fee_tier"`
+		QuoterV2 string         `yaml:"quoter_v2"`
 		FeeTiers []uint32       `yaml:"fee_tiers"`
 		Venues   []core.VenueID `yaml:"venues"`
+
+		Sushi struct {
+			Router string `yaml:"router"`
+		} `yaml:"sushi"`
+		CamelotV2 struct {
+			Router string `yaml:"router"`
+		} `yaml:"camelot_v2"`
 	} `yaml:"dex"`
 
 	Risk struct {
@@ -82,16 +62,10 @@ type Config struct {
 		BaseQty float64 `yaml:"base_qty"`
 	} `yaml:"trade"`
 
-	Metrics struct {
-		ListenAddr string `yaml:"listen_addr"`
-	} `yaml:"metrics"`
-
 	Timings struct {
 		QuoteIntervalMs int `yaml:"quote_interval_ms"`
 		DetectorTickMs  int `yaml:"detector_tick_ms"`
 	} `yaml:"timings"`
-
-	Redis RedisCfg `yaml:"redis"`
 }
 
 func Load(path string) (*Config, error) {
@@ -103,6 +77,7 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(b, &c); err != nil {
 		return nil, err
 	}
+
 	if c.Timings.QuoteIntervalMs == 0 {
 		c.Timings.QuoteIntervalMs = 300
 	}
@@ -112,17 +87,8 @@ func Load(path string) (*Config, error) {
 	if c.Risk.MinFillRatio == 0 {
 		c.Risk.MinFillRatio = 0.7
 	}
-	if c.Redis.Stream == "" {
-		c.Redis.Stream = "book:stream"
-	}
-	if c.Redis.ActiveKey == "" {
-		c.Redis.ActiveKey = "book:active"
-	}
-	if c.Redis.SnapNS == "" {
-		c.Redis.SnapNS = "book:snap:"
-	}
 	if len(c.DEX.Venues) == 0 {
-		c.DEX.Venues = []core.VenueID{core.VenueUniswapV3}
+		c.DEX.Venues = []core.VenueID{core.VenueUniswapV3, core.VenueSushiV2, core.VenueCamelotV2}
 	}
 	return &c, nil
 }
@@ -130,7 +96,6 @@ func Load(path string) (*Config, error) {
 func (c *Config) QuoteInterval() time.Duration {
 	return time.Duration(c.Timings.QuoteIntervalMs) * time.Millisecond
 }
-
 func (c *Config) DetectorTick() time.Duration {
 	return time.Duration(c.Timings.DetectorTickMs) * time.Millisecond
 }

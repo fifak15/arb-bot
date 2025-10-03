@@ -29,10 +29,15 @@ chain:
   gas_limit_swap: 180000
 
 dex:
-  venues: [ "uniswap_v3", "sushi_v2", "camelot_v2" ]
-  usdt: "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"
+  venues: ["uniswap_v3", "sushi_v2", "camelot_v2"]
+  usdt: "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9" # USDT (Arbitrum)
+  quoter_v2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e" # UniswapV3QuoterV2
   fee_tiers: [500, 3000, 10000]
-  quoter_v2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
+
+  sushi:
+    router: "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"
+  camelot_v2:
+    router: "0xC873fEcbd354f5A56E00E710B90EF4201db2448d"
 
 risk:
   max_slippage_bps: 50
