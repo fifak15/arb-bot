@@ -29,9 +29,9 @@ chain:
   gas_limit_swap: 180000
 
 dex:
+  venues: [ "uniswap_v3", "sushi_v2", "camelot_v2" ]
   usdt: "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"
-  fee_tiers: [ 500, 3000, 10000 ]
-  quoter_v1: ""
+  fee_tiers: [500, 3000, 10000]
   quoter_v2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
 
 risk:

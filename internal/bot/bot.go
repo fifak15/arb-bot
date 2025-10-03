@@ -14,11 +14,13 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/you/arb-bot/internal/config"
 	"github.com/you/arb-bot/internal/connectors/cex/mexc"
-	"github.com/you/arb-bot/internal/dash" // ★ добавили
+	"github.com/you/arb-bot/internal/execution"
+
+	"github.com/you/arb-bot/internal/dash"
 	"github.com/you/arb-bot/internal/detector"
 	"github.com/you/arb-bot/internal/dex/univ3"
 	"github.com/you/arb-bot/internal/discovery"
-	"github.com/you/arb-bot/internal/execution"
+
 	"github.com/you/arb-bot/internal/marketdata"
 	"github.com/you/arb-bot/internal/risk"
 	"github.com/you/arb-bot/internal/types"
@@ -104,11 +106,6 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 		b.log.Info("WS book ready for all symbols")
 	}
 
-	quoter, err := univ3.NewMultiQuoter(b.cfg, b.log)
-	if err != nil {
-		b.log.Fatal("failed to initialize uniswap multiquoter", zap.Error(err))
-	}
-
 	cex := &wsCEX{book: book}
 	tiersToTest := b.cfg.DEX.FeeTiers
 	if len(tiersToTest) == 0 {
@@ -153,7 +150,7 @@ func (b *Bot) Run(ctx context.Context, _ bool) {
 	for _, pm := range filtered {
 		pm := pm
 		ft := perPairTiers[pm.Symbol]
-		go b.runPairPipeline(ctx, pm, cex, quoter, ft, store) // ★ передаём store
+		go b.runPairPipeline(ctx, pm, cex, ft, store)
 	}
 
 	<-ctx.Done()
@@ -164,9 +161,8 @@ func (b *Bot) runPairPipeline(
 	ctx context.Context,
 	pm discovery.PairMeta,
 	cex *wsCEX,
-	quoter univ3.Quoter,
 	feeTiersOverride []uint32,
-	store *dash.Store, // ★ новое
+	store *dash.Store,
 ) {
 	cfg := *b.cfg
 	cfg.Pair = pm.Symbol
@@ -179,7 +175,7 @@ func (b *Bot) runPairPipeline(
 	oppCh := make(chan types.Opportunity, 64)
 
 	// marketdata → mdCh
-	go marketdata.Run(ctx, &cfg, pm, cex, quoter, mdCh, b.log)
+	go marketdata.Run(ctx, &cfg, pm, cex, mdCh, b.log)
 
 	// фан-аут: в Store дашборда + в детектор
 	baseSym := strings.Split(cfg.Pair, "_")[0]
@@ -229,13 +225,9 @@ func (b *Bot) runPairPipeline(
 			}
 		}()
 	} else {
-		router, err := univ3.NewRouter(&cfg, b.log)
-		if err != nil {
-			b.log.Fatal("failed to initialize uniswap router", zap.String("pair", cfg.Pair), zap.Error(err))
-		}
 		riskEng := risk.NewEngine(&cfg)
 		baseAddr := common.HexToAddress(pm.Addr)
-		exec, err := execution.NewExecutor(&cfg, nil, router, riskEng, b.log, baseAddr) // динамический base
+		exec, err := execution.NewExecutor(&cfg, nil, riskEng, b.log, baseAddr)
 		if err != nil {
 			b.log.Fatal("failed to initialize executor", zap.String("pair", cfg.Pair), zap.Error(err))
 		}
@@ -244,8 +236,6 @@ func (b *Bot) runPairPipeline(
 
 	b.log.Info("pipeline started", zap.String("pair", cfg.Pair), zap.String("addr", pm.Addr))
 }
-
-// ===== WS-кэш книги MEXC и вспомогательные =====
 
 type BookCache struct {
 	mu   sync.RWMutex

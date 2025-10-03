@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/you/arb-bot/internal/config"
+	"github.com/you/arb-bot/internal/dex/core"
 	"github.com/you/arb-bot/internal/types"
 	"go.uber.org/zap"
 )
@@ -23,11 +24,6 @@ type cexIface interface {
 	PlaceIOC(ctx context.Context, symbol string, side string, qty float64, price float64) (orderID string, filledQty, avgPrice float64, err error)
 }
 
-type routerIface interface {
-	SwapExactInput(ctx context.Context, tokenIn, tokenOut common.Address, amountIn *big.Int, minOut *big.Int, feeTier uint32) (txHash string, err error)
-	SwapExactOutput(ctx context.Context, tokenIn, tokenOut common.Address, amountOut *big.Int, maxIn *big.Int, feeTier uint32) (txHash string, err error)
-}
-
 type Risk interface {
 	AllowTrade(netUSD, roi float64) bool
 }
@@ -35,7 +31,6 @@ type Risk interface {
 type Executor struct {
 	cfg          *config.Config
 	cex          cexIface
-	router       routerIface
 	risk         Risk
 	log          *zap.Logger
 	ec           *ethclient.Client
@@ -45,7 +40,7 @@ type Executor struct {
 	baseDecimals int
 }
 
-func NewExecutor(cfg *config.Config, cex cexIface, router routerIface, risk Risk, log *zap.Logger, baseAddr common.Address) (*Executor, error) {
+func NewExecutor(cfg *config.Config, cex cexIface, risk Risk, log *zap.Logger, baseAddr common.Address) (*Executor, error) {
 	ec, err := ethclient.Dial(cfg.Chain.RPCHTTP)
 	if err != nil {
 		return nil, fmt.Errorf("dial rpc for executor: %w", err)
@@ -54,7 +49,6 @@ func NewExecutor(cfg *config.Config, cex cexIface, router routerIface, risk Risk
 	e := &Executor{
 		cfg:      cfg,
 		cex:      cex,
-		router:   router,
 		risk:     risk,
 		log:      log,
 		ec:       ec,
@@ -92,10 +86,6 @@ func (e *Executor) Run(ctx context.Context, in <-chan types.Opportunity) {
 				e.log.Debug("Trade rejected by risk management", zap.Float64("netUSD", opp.NetUSD), zap.Float64("roi", opp.ROI))
 				continue
 			}
-			if e.router == nil {
-				e.log.Error("Router not initialized, cannot execute swap")
-				continue
-			}
 
 			switch opp.Direction {
 			case types.CEXBuyDEXSell:
@@ -111,8 +101,13 @@ func (e *Executor) Run(ctx context.Context, in <-chan types.Opportunity) {
 }
 
 func (e *Executor) handleCexBuyDexSell(ctx context.Context, opp types.Opportunity) {
-	log := e.log.With(zap.String("direction", "CEX_BUY_DEX_SELL"))
+	log := e.log.With(zap.String("direction", "CEX_BUY_DEX_SELL"), zap.String("venue", string(opp.DexVenue)))
 	log.Info("Executing opportunity")
+
+	if e.cex == nil {
+		log.Error("CEX execution interface is nil")
+		return
+	}
 
 	orderID, filled, avgPx, err := e.cex.PlaceIOC(ctx, e.cfg.Pair, "BUY", opp.QtyBase, opp.BuyPxCEX)
 	if err != nil || filled <= 0 {
@@ -128,6 +123,7 @@ func (e *Executor) handleCexBuyDexSell(ctx context.Context, opp types.Opportunit
 	minOut := new(big.Float).Mul(big.NewFloat(expectedOutUSD*slippage), big.NewFloat(math.Pow10(e.usdxDecimals)))
 	minOutInt, _ := minOut.Int(nil)
 
+	// amountIn base
 	scaleBase := new(big.Float).SetFloat64(math.Pow10(e.baseDecimals))
 	inBase := new(big.Int)
 	new(big.Float).Mul(big.NewFloat(filled), scaleBase).Int(inBase)
@@ -135,10 +131,16 @@ func (e *Executor) handleCexBuyDexSell(ctx context.Context, opp types.Opportunit
 	baseAddr := e.baseAddr
 	usdxAddr := common.HexToAddress(e.cfg.DEX.USDT)
 
-	tx, err := e.router.SwapExactInput(ctx, baseAddr, usdxAddr, inBase, minOutInt, opp.DexFeeTier)
+	v := core.Get(opp.DexVenue)
+	if v == nil || v.Router == nil {
+		log.Error("DEX router not available", zap.String("venue", string(opp.DexVenue)))
+		return
+	}
+
+	tx, err := v.Router.SwapExactInput(ctx, baseAddr, usdxAddr, inBase, minOutInt, core.QuoteMeta{FeeTier: opp.DexFeeTier})
 	if err != nil {
 		log.Error("DEX swap failed, attempting to reverse CEX trade", zap.Error(err))
-		_, _, _, revErr := e.cex.PlaceIOC(ctx, e.cfg.Pair, "SELL", filled, avgPx*(1.0-0.01)) // -1% для вероятного мгновенного исполнения
+		_, _, _, revErr := e.cex.PlaceIOC(ctx, e.cfg.Pair, "SELL", filled, avgPx*(1.0-0.01))
 		if revErr != nil {
 			log.Error("FATAL: CEX reversal trade failed, manual intervention required", zap.Error(revErr), zap.Float64("stuck_qty", filled))
 		} else {
@@ -156,7 +158,7 @@ func (e *Executor) handleCexBuyDexSell(ctx context.Context, opp types.Opportunit
 }
 
 func (e *Executor) handleDexBuyCexSell(ctx context.Context, opp types.Opportunity) {
-	log := e.log.With(zap.String("direction", "DEX_BUY_CEX_SELL"))
+	log := e.log.With(zap.String("direction", "DEX_BUY_CEX_SELL"), zap.String("venue", string(opp.DexVenue)))
 	log.Info("Executing opportunity")
 
 	scaleBase := new(big.Float).SetFloat64(math.Pow10(e.baseDecimals))
@@ -170,19 +172,27 @@ func (e *Executor) handleDexBuyCexSell(ctx context.Context, opp types.Opportunit
 	baseAddr := e.baseAddr
 	usdxAddr := common.HexToAddress(e.cfg.DEX.USDT)
 
-	tx, err := e.router.SwapExactOutput(ctx, usdxAddr, baseAddr, amountOutBase, maxInInt, opp.DexFeeTier)
+	v := core.Get(opp.DexVenue)
+	if v == nil || v.Router == nil {
+		log.Error("DEX router not available", zap.String("venue", string(opp.DexVenue)))
+		return
+	}
+
+	tx, err := v.Router.SwapExactOutput(ctx, usdxAddr, baseAddr, amountOutBase, maxInInt, core.QuoteMeta{FeeTier: opp.DexFeeTier})
 	if err != nil {
 		log.Error("DEX swap failed", zap.Error(err))
 		return
 	}
 	log.Info("DEX buy swap executed", zap.String("tx_hash", tx))
 
-	// 2) Продаём на CEX купленный объём базового токена
+	if e.cex == nil {
+		log.Error("CEX execution interface is nil")
+		return
+	}
 	orderID, filled, avgPx, err := e.cex.PlaceIOC(ctx, e.cfg.Pair, "SELL", opp.QtyBase, opp.SellPxCEX)
 	if err != nil || filled < opp.QtyBase*e.cfg.Risk.MinFillRatio {
 		log.Error("IOC on CEX failed or not filled sufficiently, attempting to reverse DEX trade", zap.Error(err), zap.Float64("filled_qty", filled))
-		// REVERSAL: продаём купленный базовый токен обратно на DEX за стейбл
-		_, revErr := e.router.SwapExactInput(ctx, baseAddr, usdxAddr, amountOutBase, big.NewInt(0), opp.DexFeeTier)
+		_, revErr := v.Router.SwapExactInput(ctx, baseAddr, usdxAddr, amountOutBase, big.NewInt(0), core.QuoteMeta{FeeTier: opp.DexFeeTier})
 		if revErr != nil {
 			log.Error("FATAL: DEX reversal trade failed, manual intervention required", zap.Error(revErr), zap.Float64("stuck_qty", opp.QtyBase))
 		} else {

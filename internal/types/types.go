@@ -1,6 +1,10 @@
 package types
 
-import "time"
+import (
+	"time"
+
+	"github.com/you/arb-bot/internal/dex/core"
+)
 
 type Direction string
 
@@ -17,13 +21,15 @@ type PairMeta struct {
 }
 
 type Opportunity struct {
-	Direction      Direction
-	QtyBase        float64
-	BuyPxCEX       float64
-	SellPxCEX      float64
-	DexOutUSD      float64 // For CEXBuyDEXSell: how much USD we get for BaseQty
-	DexInUSD       float64 // For DEXBuyCEXSell: how much USD we need to buy BaseQty
-	DexFeeTier     uint32
+	Direction  Direction
+	QtyBase    float64
+	BuyPxCEX   float64
+	SellPxCEX  float64
+	DexOutUSD  float64 // For CEXBuyDEXSell: how much USD we get for BaseQty
+	DexInUSD   float64 // For DEXBuyCEXSell: how much USD we need to buy BaseQty
+	DexFeeTier uint32
+	DexVenue   core.VenueID
+
 	GasUSD, NetUSD float64
 	ROI            float64
 	Ts             time.Time

@@ -4,6 +4,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/you/arb-bot/internal/dex/core" // <— проверь путь модуля
 	"gopkg.in/yaml.v3"
 )
 
@@ -60,12 +61,13 @@ type Config struct {
 	} `yaml:"chain"`
 
 	DEX struct {
-		Router   string   `yaml:"router"`
-		QuoterV1 string   `yaml:"quoter_v1"`
-		QuoterV2 string   `yaml:"quoter_v2"`
-		USDT     string   `yaml:"usdt"`
-		FeeTier  uint32   `yaml:"fee_tier"`
-		FeeTiers []uint32 `yaml:"fee_tiers"`
+		Router   string         `yaml:"router"`
+		QuoterV1 string         `yaml:"quoter_v1"`
+		QuoterV2 string         `yaml:"quoter_v2"`
+		USDT     string         `yaml:"usdt"`
+		FeeTier  uint32         `yaml:"fee_tier"`
+		FeeTiers []uint32       `yaml:"fee_tiers"`
+		Venues   []core.VenueID `yaml:"venues"`
 	} `yaml:"dex"`
 
 	Risk struct {
@@ -118,6 +120,9 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Redis.SnapNS == "" {
 		c.Redis.SnapNS = "book:snap:"
+	}
+	if len(c.DEX.Venues) == 0 {
+		c.DEX.Venues = []core.VenueID{core.VenueUniswapV3}
 	}
 	return &c, nil
 }
