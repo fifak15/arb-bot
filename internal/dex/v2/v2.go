@@ -13,7 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 
@@ -59,7 +59,7 @@ func New(ec *ethclient.Client, router, recipient common.Address, gasLimit uint64
 		from    common.Address
 		chainID *big.Int
 	)
-	if pkHex != "" {
+	if strings.TrimSpace(pkHex) != "" {
 		key, err = crypto.HexToECDSA(strings.TrimPrefix(pkHex, "0x"))
 		if err != nil {
 			return nil, err
@@ -117,14 +117,15 @@ func (v *V2) QuoteDexOutUSD(ctx context.Context, tokenIn, tokenOut common.Addres
 	outUSD = outFloat                                    // предполагаем стейбл (USDT/USDC)
 
 	// gas estimation for swapExactTokensForTokens(amountIn, 0, path, recipient, deadline)
-	swapData, _ := v.abi.Pack("swapExactTokensForTokens", inWei, big.NewInt(0), path, v.recipient, big.NewInt(time.Now().Add(5*time.Minute).Unix()))
-	gasUSD, _ = v.estimateGasUSD(ctx, swapData, ethUSD) // ignore est error → 0 fallback
+	deadline := big.NewInt(time.Now().Add(5 * time.Minute).Unix())
+	swapData, _ := v.abi.Pack("swapExactTokensForTokens", inWei, big.NewInt(0), path, v.recipient, deadline)
+	gasUSD, _ = v.estimateGasUSD(ctx, swapData, ethUSD) // игнор ошибки → fallback
 
 	return outUSD, gasUSD, core.QuoteMeta{}, nil
 }
 
 func (v *V2) QuoteDexInUSD(ctx context.Context, tokenIn, tokenOut common.Address, qtyBase, ethUSD float64) (inUSD, gasUSD float64, meta core.QuoteMeta, err error) {
-	// want exactOutput = qtyBase of tokenOut (base)
+	// хотим exactOutput = qtyBase токена tokenOut
 	outWei, inDec, err := v.calcOutWeiAndInDecimals(ctx, tokenIn, tokenOut, qtyBase)
 	if err != nil {
 		return 0, 0, core.QuoteMeta{}, err
@@ -148,12 +149,11 @@ func (v *V2) QuoteDexInUSD(ctx context.Context, tokenIn, tokenOut common.Address
 	inUSD = inFloat                       // предполагаем стейбл
 
 	// gas estimation for swapTokensForExactTokens(amountOut, maxIn, path, recipient, deadline)
-	// ставим maxIn = inWei*1.02 (для оценки газа значения не критичны)
 	inWei := new(big.Int).Set(amounts[0])
 	maxIn := new(big.Int).Mul(inWei, big.NewInt(102))
 	maxIn = new(big.Int).Div(maxIn, big.NewInt(100))
-
-	swapData, _ := v.abi.Pack("swapTokensForExactTokens", outWei, maxIn, path, v.recipient, big.NewInt(time.Now().Add(5*time.Minute).Unix()))
+	deadline := big.NewInt(time.Now().Add(5 * time.Minute).Unix())
+	swapData, _ := v.abi.Pack("swapTokensForExactTokens", outWei, maxIn, path, v.recipient, deadline)
 	gasUSD, _ = v.estimateGasUSD(ctx, swapData, ethUSD)
 
 	return inUSD, gasUSD, core.QuoteMeta{}, nil
@@ -166,7 +166,8 @@ func (v *V2) SwapExactInput(ctx context.Context, tokenIn, tokenOut common.Addres
 		return "", errors.New("v2 router: no private key configured")
 	}
 	path := []common.Address{tokenIn, tokenOut}
-	data, _ := v.abi.Pack("swapExactTokensForTokens", amountIn, minOut, path, v.recipient, big.NewInt(time.Now().Add(5*time.Minute).Unix()))
+	deadline := big.NewInt(time.Now().Add(5 * time.Minute).Unix())
+	data, _ := v.abi.Pack("swapExactTokensForTokens", amountIn, minOut, path, v.recipient, deadline)
 	return v.sendSwap(ctx, data)
 }
 
@@ -175,7 +176,8 @@ func (v *V2) SwapExactOutput(ctx context.Context, tokenIn, tokenOut common.Addre
 		return "", errors.New("v2 router: no private key configured")
 	}
 	path := []common.Address{tokenIn, tokenOut}
-	data, _ := v.abi.Pack("swapTokensForExactTokens", amountOut, maxIn, path, v.recipient, big.NewInt(time.Now().Add(5*time.Minute).Unix()))
+	deadline := big.NewInt(time.Now().Add(5 * time.Minute).Unix())
+	data, _ := v.abi.Pack("swapTokensForExactTokens", amountOut, maxIn, path, v.recipient, deadline)
 	return v.sendSwap(ctx, data)
 }
 
@@ -246,34 +248,39 @@ func (v *V2) fetchDecimals(ctx context.Context, token common.Address) (int, erro
 }
 
 func (v *V2) estimateGasUSD(ctx context.Context, data []byte, ethUSD float64) (float64, error) {
-	// Try on-chain estimation; fallback to configured gasLimit
-	var gas uint64
-	var err error
+	// 1) Пытаемся оценить газ на узле; если не удалось — используем конфиг/запас
 	msg := ethereum.CallMsg{From: v.from, To: &v.router, Data: data}
-	gas, err = v.ec.EstimateGas(ctx, msg)
+	gas, err := v.ec.EstimateGas(ctx, msg)
 	if err != nil || gas == 0 {
 		gas = v.gasLimit
 	}
+
 	tip, _ := v.ec.SuggestGasTipCap(ctx)
 	if tip == nil {
-		tip = big.NewInt(2_000_000_000) // 2 gwei
+		tip = big.NewInt(2_000_000_000)
 	}
-	h, _ := v.ec.HeaderByNumber(ctx, nil)
 	var baseFee *big.Int
-	if h != nil && h.BaseFee != nil {
+	if h, _ := v.ec.HeaderByNumber(ctx, nil); h != nil && h.BaseFee != nil {
 		baseFee = new(big.Int).Set(h.BaseFee)
 	} else {
-		sp, _ := v.ec.SuggestGasPrice(ctx)
-		if sp == nil {
-			sp = big.NewInt(5_000_000_000) // 5 gwei
+		if sp, _ := v.ec.SuggestGasPrice(ctx); sp != nil {
+			baseFee = sp
+		} else {
+			baseFee = big.NewInt(5_000_000_000)
 		}
-		baseFee = sp
 	}
-	feeCap := new(big.Int).Add(new(big.Int).Mul(baseFee, big.NewInt(2)), tip) // ~ maxFeePerGas
-	eth := new(big.Float).Mul(new(big.Float).SetInt(feeCap), big.NewFloat(float64(gas)))
-	eth = new(big.Float).Quo(eth, big.NewFloat(1e9)) // gwei → ETH
-	val, _ := eth.Float64()
-	return val * ethUSD, nil
+	feeCap := new(big.Int).Add(new(big.Int).Mul(baseFee, big.NewInt(2)), tip)
+
+	totalWei := new(big.Int).Mul(feeCap, new(big.Int).SetUint64(gas))
+	ethFloat := new(big.Float).Quo(new(big.Float).SetInt(totalWei), big.NewFloat(1e18))
+	ethVal, _ := ethFloat.Float64()
+	gasUSD := ethVal * ethUSD
+
+	// sanity guard: фильтруем мусор
+	if !isFinite(gasUSD) || gasUSD < 0 {
+		return 0, errors.New("bad gasUSD")
+	}
+	return gasUSD, nil
 }
 
 func (v *V2) sendSwap(ctx context.Context, data []byte) (string, error) {
@@ -281,16 +288,15 @@ func (v *V2) sendSwap(ctx context.Context, data []byte) (string, error) {
 	if err != nil || tip == nil {
 		tip = big.NewInt(2_000_000_000)
 	}
-	h, _ := v.ec.HeaderByNumber(ctx, nil)
 	var baseFee *big.Int
-	if h != nil && h.BaseFee != nil {
+	if h, _ := v.ec.HeaderByNumber(ctx, nil); h != nil && h.BaseFee != nil {
 		baseFee = h.BaseFee
 	} else {
-		sp, _ := v.ec.SuggestGasPrice(ctx)
-		if sp == nil {
-			sp = big.NewInt(5_000_000_000)
+		if sp, _ := v.ec.SuggestGasPrice(ctx); sp != nil {
+			baseFee = sp
+		} else {
+			baseFee = big.NewInt(5_000_000_000)
 		}
-		baseFee = sp
 	}
 	feeCap := new(big.Int).Add(new(big.Int).Mul(baseFee, big.NewInt(2)), tip)
 
@@ -299,13 +305,13 @@ func (v *V2) sendSwap(ctx context.Context, data []byte) (string, error) {
 		return "", err
 	}
 
-	// Gas estimate
+	// Gas estimate с фоллбеком
 	gas, err := v.ec.EstimateGas(ctx, ethereum.CallMsg{From: v.from, To: &v.router, Data: data})
 	if err != nil || gas == 0 {
 		gas = v.gasLimit
 	}
 
-	tx := types.NewTx(&types.DynamicFeeTx{
+	tx := gethtypes.NewTx(&gethtypes.DynamicFeeTx{
 		ChainID:   v.chainID,
 		Nonce:     nonce,
 		To:        &v.router,
@@ -315,7 +321,7 @@ func (v *V2) sendSwap(ctx context.Context, data []byte) (string, error) {
 		Data:      data,
 		Value:     big.NewInt(0),
 	})
-	signed, err := types.SignTx(tx, types.LatestSignerForChainID(v.chainID), v.priv)
+	signed, err := gethtypes.SignTx(tx, gethtypes.LatestSignerForChainID(v.chainID), v.priv)
 	if err != nil {
 		return "", err
 	}
@@ -325,7 +331,7 @@ func (v *V2) sendSwap(ctx context.Context, data []byte) (string, error) {
 	return signed.Hash().Hex(), nil
 }
 
-// toFloat converts wei to decimal float using token decimals.
+// toFloat converts wei (scaled int) to decimal float using token decimals.
 func toFloat(x *big.Int, decimals int) float64 {
 	if x == nil {
 		return 0
@@ -335,4 +341,8 @@ func toFloat(x *big.Int, decimals int) float64 {
 	f.Quo(f, div)
 	val, _ := f.Float64()
 	return val
+}
+
+func isFinite(x float64) bool {
+	return !math.IsNaN(x) && !math.IsInf(x, 1) && !math.IsInf(x, -1)
 }

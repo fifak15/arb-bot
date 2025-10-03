@@ -43,6 +43,7 @@ func Run(ctx context.Context, cfg *config.Config, pm discovery.PairMeta, cex cex
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			// 1) mid по торгуемой паре (для CEX цены)
 			bid, ask, err := cex.BestBidAsk(cfg.Pair)
 			if err != nil || bid == 0 || ask == 0 {
 				if err != nil {
@@ -50,7 +51,14 @@ func Run(ctx context.Context, cfg *config.Config, pm discovery.PairMeta, cex cex
 				}
 				continue
 			}
-			imetrics.CEXMid.Set(0.5 * (bid + ask))
+			mid := 0.5 * (bid + ask)
+			imetrics.CEXMid.Set(mid)
+
+			// 2) НУЖНО: реальная цена ETH в USD для пересчёта газа
+			ethUSD := 2000.0 // безопасный дефолт
+			if eb, ea, eerr := cex.BestBidAsk("ETHUSDT"); eerr == nil && eb > 0 && ea > 0 {
+				ethUSD = 0.5 * (eb + ea)
+			}
 
 			venues := core.Enabled(cfg.DEX.Venues)
 			if len(venues) == 0 {
@@ -73,12 +81,13 @@ func Run(ctx context.Context, cfg *config.Config, pm discovery.PairMeta, cex cex
 				mu sync.Mutex
 			)
 
+			// SELL path: base -> USDT (exactInput)
 			for _, v := range venues {
 				v := v
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					outUSD, gasUSD, meta, err := v.Quoter.QuoteDexOutUSD(ctx, base, usdx, cfg.Trade.BaseQty, 0.5*(bid+ask))
+					outUSD, gasUSD, meta, err := v.Quoter.QuoteDexOutUSD(ctx, base, usdx, cfg.Trade.BaseQty, ethUSD)
 					if err == nil && outUSD > 0 {
 						mu.Lock()
 						if !haveSell || (outUSD-gasUSD) > (sellOut-sellGas) {
@@ -91,13 +100,14 @@ func Run(ctx context.Context, cfg *config.Config, pm discovery.PairMeta, cex cex
 			}
 			wg.Wait()
 
+			// BUY path: USDT -> base (exactOutput)
 			wg = sync.WaitGroup{}
 			for _, v := range venues {
 				v := v
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					inUSD, gasUSD, meta, err := v.Quoter.QuoteDexInUSD(ctx, usdx, base, cfg.Trade.BaseQty, 0.5*(bid+ask))
+					inUSD, gasUSD, meta, err := v.Quoter.QuoteDexInUSD(ctx, usdx, base, cfg.Trade.BaseQty, ethUSD)
 					if err == nil && inUSD > 0 {
 						mu.Lock()
 						if !haveBuy || (inUSD+gasUSD) < (buyIn+buyGas) {
@@ -109,6 +119,14 @@ func Run(ctx context.Context, cfg *config.Config, pm discovery.PairMeta, cex cex
 				}()
 			}
 			wg.Wait()
+
+			if !haveSell && !haveBuy {
+				log.Debug("marketdata: no valid quotes from any venue",
+					zap.String("pair", cfg.Pair),
+					zap.Float64("eth_usd", ethUSD),
+				)
+				continue
+			}
 
 			snap := Snapshot{
 				BestAskCEX: ask,
