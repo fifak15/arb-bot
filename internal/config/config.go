@@ -8,11 +8,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type ArbBotCfg struct {
+	MinPairs          int           `yaml:"-"`
+	BootstrapLookback time.Duration `yaml:"-"`
+	BootstrapPoll     time.Duration `yaml:"-"`
+}
+
 type Config struct {
-	Pair     string `yaml:"pair"`
-	Scenario string `yaml:"scenario"`
-	Mode     string `yaml:"mode"`
-	DryRun   bool   `yaml:"dry_run"`
+	Pair     string    `yaml:"pair"`
+	Scenario string    `yaml:"scenario"`
+	Mode     string    `yaml:"mode"`
+	DryRun   bool      `yaml:"dry_run"`
+	ArbBot   ArbBotCfg `yaml:"-"`
 
 	Discovery struct {
 		FromRank int `yaml:"from_rank"`

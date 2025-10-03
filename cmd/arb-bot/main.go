@@ -10,8 +10,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// parseFlags defines and parses the command-line flags.
-// It returns the parsed values.
 func parseFlags() (string, int, time.Duration, time.Duration, bool) {
 	cfgPath := flag.String("config", "./config.yaml", "path to config file")
 	minPairs := flag.Int("min-pairs", 15, "minimum pairs to start monitoring")
